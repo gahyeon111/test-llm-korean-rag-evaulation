@@ -1,0 +1,8 @@
+# 코어 (파이프라인 전 구간)
+requests>=2.31
+pandas>=2.0
+pymupdf>=1.24          # 페이지 렌더링 (parse_vlm)
+
+# 0단계 데이터 수급에서만 사용 (CSV 를 직접 받아 쓰면 불필요)
+datasets>=2.18
+huggingface_hub>=0.23

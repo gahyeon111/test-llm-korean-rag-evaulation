@@ -1,0 +1,153 @@
+"""4단계: 동결된 contexts 로 평가 대상 모델을 호출한다.
+
+요청 옵션은 스펙 §2 고정값: temperature 0, provider fp8 고정(allow_fallbacks=false),
+reasoning 은 nested 형식(reasoning.effort)만 사용.
+
+출력
+  results/raw/<endpoint>__<model>__<reasoning>.csv
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+
+from common import (CONTEXTS_JSONL, OpenRouterError, PROMPT_DIR, RESULT_RAW_DIR,
+                    build_provider, chat_completion, read_jsonl, require_api_key)
+
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+PROMPT_VERSION = "answer_v1"
+COLUMNS = ["qid", "domain", "context_type", "question", "target_answer",
+           "target_file", "target_page", "model_answer", "status", "error",
+           "provider", "latency_s", "attempts", "prompt_tokens", "completion_tokens",
+           "reasoning_tokens", "total_tokens", "model", "reasoning_effort",
+           "temperature", "prompt_version", "contexts_sha256", "run_at"]
+
+
+def output_path(model: str, reasoning: str, endpoint: str = "openrouter") -> Path:
+    slug = model.split("/")[-1].replace(":", "-")
+    return RESULT_RAW_DIR / f"{endpoint}__{slug}__{reasoning}.csv"
+
+
+def contexts_hash(path: Path) -> str:
+    meta = path.parent / (path.name + ".meta.json")
+    if meta.exists():
+        return json.loads(meta.read_text(encoding="utf-8")).get("sha256", "")
+    return ""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--reasoning", default="high",
+                    choices=["none", "low", "medium", "high"],
+                    help="reasoning.effort (nested 형식으로만 전송)")
+    ap.add_argument("--contexts", default=str(CONTEXTS_JSONL))
+    ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--quantization", default="fp8", help="빈 문자열이면 provider 고정 해제")
+    ap.add_argument("--provider-order", default="", help="쉼표 구분 provider 우선순위")
+    ap.add_argument("--allow-fallbacks", action="store_true")
+    ap.add_argument("--limit", type=int, default=0, help="드라이런용 N문항")
+    ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--sleep", type=float, default=0.0)
+    ap.add_argument("--out", default="")
+    ap.add_argument("--force", action="store_true", help="기존 결과 무시하고 전부 재호출")
+    args = ap.parse_args()
+
+    api_key = require_api_key()
+    contexts_path = Path(args.contexts)
+    if not contexts_path.exists():
+        raise SystemExit(f"{contexts_path} 가 없습니다. build_contexts.py 를 먼저 실행하세요.")
+
+    records = read_jsonl(contexts_path)
+    if args.limit:
+        records = records[:args.limit]
+
+    template = (PROMPT_DIR / f"{PROMPT_VERSION}.txt").read_text(encoding="utf-8")
+    provider = build_provider(
+        quantizations=[args.quantization] if args.quantization else [],
+        order=[p.strip() for p in args.provider_order.split(",")] if args.provider_order else [],
+        allow_fallbacks=args.allow_fallbacks,
+    )
+    reasoning_effort = None if args.reasoning == "none" else args.reasoning
+    out_path = Path(args.out) if args.out else output_path(args.model, args.reasoning)
+
+    done: dict[str, dict] = {}
+    if out_path.exists() and not args.force:
+        prev = pd.read_csv(out_path).to_dict("records")
+        done = {str(r["qid"]): r for r in prev if str(r.get("status")) == "ok"}
+        print(f"이어하기: 기존 성공 {len(done)}건 재사용 ({out_path.name})")
+
+    ctx_sha = contexts_hash(contexts_path)
+    run_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict] = []
+    n_failed = 0
+
+    for i, rec in enumerate(records, start=1):
+        qid = rec["qid"]
+        if qid in done:
+            rows.append(done[qid])
+            continue
+
+        prompt = template.format(context=rec["context"], question=rec["question"])
+        base = {k: rec.get(k, "") for k in
+                ["qid", "domain", "context_type", "question", "target_answer",
+                 "target_file", "target_page"]}
+        base |= {
+            "model": args.model, "reasoning_effort": args.reasoning,
+            "temperature": args.temperature, "prompt_version": PROMPT_VERSION,
+            "contexts_sha256": ctx_sha, "run_at": run_at,
+        }
+
+        try:
+            result = chat_completion(
+                args.model,
+                [{"role": "user", "content": prompt}],
+                temperature=args.temperature,
+                reasoning_effort=reasoning_effort,
+                provider=provider or None,
+                retries=args.retries,
+                api_key=api_key,
+            )
+        except OpenRouterError as exc:
+            n_failed += 1
+            rows.append(base | {"model_answer": "", "status": "failed",
+                                "error": str(exc)[:500], "provider": "",
+                                "latency_s": 0, "attempts": args.retries,
+                                "prompt_tokens": 0, "completion_tokens": 0,
+                                "reasoning_tokens": 0, "total_tokens": 0})
+            print(f"[{i}/{len(records)}] {qid} … 실패: {str(exc)[:160]}")
+            continue
+
+        rows.append(base | {
+            "model_answer": result["text"], "status": "ok", "error": "",
+            "provider": result["provider"], "latency_s": result["latency_s"],
+            "attempts": result["attempts"], **result["usage"],
+        })
+        print(f"[{i}/{len(records)}] {qid} … ok "
+              f"({result['provider']}, {result['latency_s']}s, "
+              f"reasoning {result['usage']['reasoning_tokens']}tok)")
+        if args.sleep:
+            time.sleep(args.sleep)
+
+    df = pd.DataFrame(rows)
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df[COLUMNS].to_csv(out_path, index=False)
+
+    print(f"\n저장: {out_path} ({len(df)}건, 실패 {n_failed}건)")
+    routed = df.loc[df["status"] == "ok", "provider"].value_counts()
+    print("[라우팅된 provider]")
+    print(routed.to_string() if len(routed) else "  (없음)")
+    if len(routed) > 1:
+        print("경고: provider 가 여러 개로 섞였습니다 — 양자화 오염 여부를 확인하세요.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
