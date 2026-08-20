@@ -19,17 +19,18 @@ from pathlib import Path
 import pandas as pd
 import pymupdf
 
-from common import (CACHE_DIR, DATASET_CSV, OpenRouterError, PDF_DIR, PROMPT_DIR,
-                    cache_path, chat_completion, require_api_key, slugify)
+from common import (CACHE_DIR, DATASET_CSV, OpenRouterError, PROMPT_DIR,
+                    cache_path, chat_completion, pdf_path, require_api_key,
+                    safe_filename, slugify)
 
 DEFAULT_MODEL = "google/gemini-3.1-pro"
 PROMPT_VERSION = "parse_v1"
 IMAGE_DIR = CACHE_DIR.parent / "pages"
 
 
-def render_page(pdf_path: Path, page_no: int, dpi: int, page_base: int) -> bytes:
+def render_page(pdf_file: Path, page_no: int, dpi: int, page_base: int) -> bytes:
     """target_page_no 를 0-based 인덱스로 바꿔 해당 페이지만 PNG 로 렌더링."""
-    with pymupdf.open(pdf_path) as doc:
+    with pymupdf.open(pdf_file) as doc:
         index = int(page_no) - page_base
         if index < 0 or index >= doc.page_count:
             raise IndexError(f"페이지 범위 초과: page_no={page_no} (문서 {doc.page_count}p)")
@@ -91,18 +92,19 @@ def main() -> int:
             print(f"{tag} … 캐시 스킵")
             continue
 
-        pdf_path = PDF_DIR / file_name
-        if not pdf_path.exists():
+        pdf_file = pdf_path(file_name)
+        if not pdf_file.exists():
             stats["failed"] += 1
             failures.append((file_name, page_no, "PDF 없음(다운로드 실패 문서)"))
             print(f"{tag} … PDF 없음 → 스킵")
             continue
 
         try:
-            image_png = render_page(pdf_path, page_no, args.dpi, args.page_base)
+            image_png = render_page(pdf_file, page_no, args.dpi, args.page_base)
             if args.save_image:
                 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-                (IMAGE_DIR / f"{slugify(file_name)}__p{page_no}.png").write_bytes(image_png)
+                (IMAGE_DIR / safe_filename(
+                    f"{slugify(file_name)}__p{page_no}.png")).write_bytes(image_png)
             result = parse_page(image_png, prompt, args.model, api_key, args.retries)
         except (OpenRouterError, IndexError, RuntimeError) as exc:
             stats["failed"] += 1

@@ -5,12 +5,14 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -253,6 +255,28 @@ def normalize_columns(df, aliases: dict[str, list[str]], *, required: Iterable[s
     return df
 
 
+# 리눅스/ext4 의 파일명 한도는 255 바이트. 한글은 UTF-8 에서 글자당 3바이트라
+# 85자만 넘어도 걸린다 (원본 데이터셋에 그런 파일명이 실제로 있다).
+MAX_FILENAME_BYTES = 240
+
+
+def safe_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:
+    """길이 한도를 넘는 파일명을 잘라내되, 원본 이름 해시를 붙여 충돌을 막는다."""
+    name = unicodedata.normalize("NFC", str(name)).strip()
+    if len(name.encode("utf-8")) <= max_bytes:
+        return name
+    stem, ext = os.path.splitext(name)
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    budget = max_bytes - len(ext.encode("utf-8")) - len(digest) - 1
+    truncated = stem.encode("utf-8")[:budget].decode("utf-8", "ignore").rstrip()
+    return f"{truncated}_{digest}{ext}"
+
+
+def pdf_path(file_name: str) -> Path:
+    """target_file_name → 실제 저장 경로. 전 단계가 이 함수로만 경로를 만든다."""
+    return PDF_DIR / safe_filename(file_name)
+
+
 def slugify(name: str) -> str:
     """파일명을 캐시 키로 안전하게 변환 (한글은 유지)."""
     stem = Path(str(name)).stem
@@ -260,7 +284,7 @@ def slugify(name: str) -> str:
 
 
 def cache_path(file_name: str, page_no: int) -> Path:
-    return CACHE_DIR / f"{slugify(file_name)}__p{int(page_no)}.json"
+    return CACHE_DIR / safe_filename(f"{slugify(file_name)}__p{int(page_no)}.json")
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

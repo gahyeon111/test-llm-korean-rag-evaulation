@@ -28,8 +28,8 @@ import pandas as pd
 import requests
 
 from attachment_scraper import assign_attachments, collect_attachments, nfc
-from common import (DATASET_CSV, DOCUMENTS_ALIASES, DOCUMENTS_CSV, PDF_DIR,
-                    REPORT_DIR, ROOT, normalize_columns)
+from common import (DATASET_CSV, DOCUMENTS_ALIASES, DOCUMENTS_CSV, REPORT_DIR,
+                    ROOT, normalize_columns, pdf_path, safe_filename)
 
 ATTACH_CACHE = ROOT / "cache" / "attachments"
 HTML_DIR = REPORT_DIR / "failed_html"
@@ -50,7 +50,7 @@ def save_failed_html(session: requests.Session, url: str, name: str, budget: lis
     except requests.RequestException:
         return
     HTML_DIR.mkdir(parents=True, exist_ok=True)
-    (HTML_DIR / (Path(name).stem[:80] + ".html")).write_bytes(resp.content[:400_000])
+    (HTML_DIR / safe_filename(Path(name).stem + ".html")).write_bytes(resp.content[:400_000])
     budget[0] -= 1
 
 
@@ -62,7 +62,7 @@ def main() -> int:
                     help="상세페이지에서 시도할 첨부 링크 최대 개수")
     ap.add_argument("--min-score", type=float, default=LOW_SCORE,
                     help="이 유사도 미만이면 검수 대상으로 표시")
-    ap.add_argument("--keep-html", type=int, default=5,
+    ap.add_argument("--keep-html", type=int, default=20,
                     help="첨부를 못 찾은 페이지 본문을 몇 건까지 저장할지")
     ap.add_argument("--follow-links", type=int, default=3,
                     help="목록페이지로 보일 때 따라 들어갈 상세페이지 수 (0=사용 안 함)")
@@ -101,7 +101,7 @@ def main() -> int:
                     "url": url, "n_questions": q_per_doc.get(t, 0)} for t in targets}
         head = f"[{gi}/{len(groups)}] {url[:80] or '(URL 없음)'} — 문서 {len(targets)}건"
 
-        pending = [t for t in targets if args.force or not is_pdf(PDF_DIR / t)]
+        pending = [t for t in targets if args.force or not is_pdf(pdf_path(t))]
         for done in (t for t in targets if t not in pending):
             print(f"{head}\n    skipped  {done} (이미 존재)")
             rows.append(base[done] | {"file_name": done, "status": "skipped",
@@ -151,7 +151,7 @@ def main() -> int:
                 continue
             ai, score = assigned[ti]
             att = attachments[ai]
-            dest = PDF_DIR / t
+            dest = pdf_path(t)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(att["path"], dest)
 

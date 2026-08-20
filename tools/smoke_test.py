@@ -88,6 +88,16 @@ def main() -> int:
     pd.DataFrame(scored).to_csv(
         tmp / "results" / "scored" / "openrouter__test-model__high.csv", index=False)
 
+    # 긴 한글 파일명(리눅스 255바이트 한도)이 경로 생성에서 터지지 않는지
+    from common import cache_path as _cp, pdf_path, safe_filename  # noqa: E402
+
+    long_name = "특례 " + "가" * 200 + " 사건.pdf"
+    assert len(pdf_path(long_name).name.encode()) <= 240
+    assert len(_cp(long_name, 7).name.encode()) <= 240
+    assert safe_filename("특례 " + "가" * 200 + " A.pdf") != \
+        safe_filename("특례 " + "가" * 200 + " B.pdf"), "긴 이름이 같은 파일로 뭉개짐"
+    pdf_path(long_name).write_bytes(b"%PDF-1.4 ok")   # 실제 쓰기까지 확인
+
     run([sys.executable, str(SRC / "report.py")], env)
     summary = (tmp / "reports" / "summary.md").read_text(encoding="utf-8")
     assert "50.0%" in summary, "전체 정확도 집계가 기대와 다릅니다"
