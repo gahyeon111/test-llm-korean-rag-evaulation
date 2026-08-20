@@ -10,10 +10,12 @@ documents.csv 의 url 은 PDF 직링크가 아니라 게시글 상세페이지�
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import re
 import unicodedata
 import urllib.parse
-from typing import Iterable
+from pathlib import Path
 
 import requests
 
@@ -94,8 +96,19 @@ def content_disposition_filename(header: str) -> str:
             continue
     for cand in candidates:  # 한글이 살아있는 후보를 우선
         if re.search(r"[가-힣]", cand):
-            return nfc(cand)
-    return nfc(candidates[0])
+            return nfc(_unquote_leftover(cand))
+    return nfc(_unquote_leftover(candidates[0]))
+
+
+def _unquote_leftover(name: str) -> str:
+    """한글은 살아있는데 공백 등만 %XX 로 남은 경우를 마저 푼다."""
+    if "%" not in name:
+        return name
+    try:
+        decoded = urllib.parse.unquote(name, errors="strict")
+    except (UnicodeDecodeError, LookupError):
+        return name
+    return decoded or name
 
 
 def _js_download_urls(base_url: str, args_text: str, known_paths: list[str]) -> list[str]:
@@ -184,42 +197,88 @@ def fetch_pdf_bytes(session: requests.Session, url: str, referer: str,
         return None
 
 
-def scrape_pdf(session: requests.Session, page_url: str, target_name: str, *,
-               timeout: int = 60, max_candidates: int = 8,
-               max_bytes: int = 120_000_000,
-               accept_threshold: float = 0.85,
-               log: Iterable[str] | None = None) -> tuple[bytes, dict] | None:
-    """상세페이지에서 target_name 에 가장 맞는 PDF 첨부를 받아 온다."""
-    meta: dict = {"page_status": "", "candidates": 0, "picked_url": "",
-                  "picked_name": "", "score": 0.0}
+def collect_attachments(session: requests.Session, page_url: str, *,
+                        cache_dir: Path, timeout: int = 60,
+                        max_candidates: int = 10,
+                        max_bytes: int = 300_000_000) -> tuple[list[dict], dict]:
+    """상세페이지의 PDF 첨부를 **전부** 받아 캐시에 저장하고 목록을 돌려준다.
+
+    한 게시글에 여러 문서가 걸려 있는 경우가 있어서, 문서마다 페이지를 다시
+    긁는 대신 첨부를 한 번만 받아 두고 호출부에서 배정한다.
+
+    반환: ([{url, name, path, size}], meta)
+    """
+    meta: dict = {"page_status": "", "n_candidates": 0, "n_attachments": 0}
     try:
         page = session.get(page_url, headers=BROWSER_HEADERS, timeout=timeout,
                            allow_redirects=True)
     except requests.RequestException as exc:
         meta["page_status"] = f"{type(exc).__name__}: {exc}"
-        return None
+        return [], meta
+
     meta["page_status"] = page.status_code
     if page.status_code != 200:
-        return None
+        return [], meta
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if page.content[:4] == b"%PDF":   # url 이 이미 PDF 직링크인 경우
+        name = content_disposition_filename(page.headers.get("content-disposition", "")) or \
+            urllib.parse.unquote(urllib.parse.urlsplit(page.url).path.rsplit("/", 1)[-1])
+        key = hashlib.sha1(page.url.encode("utf-8")).hexdigest()
+        dest = cache_dir / f"{key}.pdf"
+        dest.write_bytes(page.content)
+        meta.update({"n_candidates": 1, "n_attachments": 1})
+        return [{"url": page.url, "name": nfc(name), "path": dest,
+                 "size": len(page.content)}], meta
 
     page.encoding = page.encoding or page.apparent_encoding
     candidates = candidate_urls(page.text, page.url)
-    meta["candidates"] = len(candidates)
+    meta["n_candidates"] = len(candidates)
 
-    best: tuple[float, bytes, str, str] | None = None
+    index_path = cache_dir / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+
+    attachments: list[dict] = []
     for url in candidates[:max_candidates]:
+        key = hashlib.sha1(url.encode("utf-8")).hexdigest()
+        cached = index.get(key)
+        if cached and (cache_dir / cached["file"]).exists():
+            attachments.append({"url": url, "name": cached["name"],
+                                "path": cache_dir / cached["file"],
+                                "size": (cache_dir / cached["file"]).stat().st_size})
+            continue
         got = fetch_pdf_bytes(session, url, page.url, timeout, max_bytes)
         if not got:
             continue
         body, name = got
-        score = name_similarity(target_name, name)
-        if best is None or score > best[0]:
-            best = (score, body, name, url)
-        if score >= accept_threshold:
-            break
+        file_name = f"{key}.pdf"
+        (cache_dir / file_name).write_bytes(body)
+        index[key] = {"name": name, "file": file_name, "url": url}
+        attachments.append({"url": url, "name": name,
+                            "path": cache_dir / file_name, "size": len(body)})
 
-    if best is None:
-        return None
-    score, body, name, url = best
-    meta |= {"picked_url": url, "picked_name": name, "score": round(score, 3)}
-    return body, meta
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta["n_attachments"] = len(attachments)
+    return attachments, meta
+
+
+def assign_attachments(targets: list[str], attachments: list[dict]) -> dict[int, tuple[int, float]]:
+    """target 파일명들에 첨부를 1:1 로 배정한다 (유사도 높은 쌍부터 확정).
+
+    같은 게시글에 걸린 문서가 여러 개일 때 모두 같은 첨부를 집는 사고를 막는다.
+    반환: {target 인덱스: (첨부 인덱스, 유사도)}
+    """
+    pairs = sorted(
+        ((name_similarity(t, a["name"]), ti, ai)
+         for ti, t in enumerate(targets) for ai, a in enumerate(attachments)),
+        key=lambda x: (-x[0], x[1], x[2]))
+    assigned: dict[int, tuple[int, float]] = {}
+    used_targets: set[int] = set()
+    used_attachments: set[int] = set()
+    for score, ti, ai in pairs:
+        if ti in used_targets or ai in used_attachments:
+            continue
+        assigned[ti] = (ai, round(score, 3))
+        used_targets.add(ti)
+        used_attachments.add(ai)
+    return assigned

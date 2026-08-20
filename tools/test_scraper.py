@@ -5,13 +5,16 @@
 """
 from __future__ import annotations
 
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from attachment_scraper import (candidate_urls, content_disposition_filename,  # noqa: E402
-                                name_similarity, scrape_pdf)
+from attachment_scraper import (assign_attachments, candidate_urls,  # noqa: E402
+                                collect_attachments, content_disposition_filename,
+                                name_similarity)
 
 PAGE_URL = "https://www.bok.or.kr/portal/bbs/B0000156/view.do?nttId=10082951&menuNo=200067"
 PAGE_HTML = """
@@ -42,6 +45,10 @@ RESPONSES = {
 class StubResponse:
     def __init__(self, url, status, headers, body):
         self.url, self.status_code, self.headers, self._body = url, status, headers, body
+
+    @property
+    def content(self):
+        return self._body
 
     @property
     def text(self):
@@ -88,20 +95,41 @@ def main() -> int:
     assert name_similarity("2024년 3월_3. 신용정보 관리규약.pdf",
                            "2. 통합신용정보 운영규약.pdf") < 0.9
 
-    # 4. 같은 페이지 URL, 다른 target → 각각 맞는 첨부를 골라야 한다
+    # 4. %20 이 남은 파일명도 풀린다 (유사도가 깎이면 엉뚱한 첨부를 고른다)
+    assert content_disposition_filename(
+        'attachment; filename="2.%20통합신용정보%20운영규약.pdf"') == "2. 통합신용정보 운영규약.pdf"
+
+    # 5. 한 페이지의 첨부는 한 번만 받아서 목록으로 돌려준다
+    cache = Path(tempfile.mkdtemp(prefix="attach-cache-"))
     session = StubSession()
-    got_b = scrape_pdf(session, PAGE_URL, "2024년 3월_3. 신용정보 관리규약.pdf")
-    assert got_b and got_b[0] == PDF_B, "3번 문서가 엉뚱한 첨부를 받음"
-    assert got_b[1]["score"] > 0.9, got_b[1]
+    StubSession.calls.clear()
+    attachments, meta = collect_attachments(session, PAGE_URL, cache_dir=cache)
+    assert meta["n_attachments"] == 2, meta
+    assert sorted(a["size"] for a in attachments) == sorted([len(PDF_A), len(PDF_B)])
 
-    got_a = scrape_pdf(session, PAGE_URL, "2024년 3월_2. 통합신용정보 운영규약.pdf")
-    assert got_a and got_a[0] == PDF_A, "2번 문서가 엉뚱한 첨부를 받음"
+    # 6. 같은 페이지에 걸린 두 문서 → 서로 다른 첨부가 배정돼야 한다
+    targets = ["2024년 3월_2. 통합신용정보 운영규약.pdf",
+               "2024년 3월_3. 신용정보 관리규약.pdf"]
+    assigned = assign_attachments(targets, attachments)
+    assert len(assigned) == 2, assigned
+    picked = {ti: attachments[ai]["path"].read_bytes() for ti, (ai, _) in assigned.items()}
+    assert picked[0] != picked[1], "두 문서에 같은 첨부가 배정됨"
+    assert picked[0] == PDF_A and picked[1] == PDF_B, "배정이 서로 뒤바뀜"
+    assert all(score > 0.9 for _, score in assigned.values()), assigned
 
-    # 5. PDF 가 없는 페이지면 None
-    empty = scrape_pdf(session, "https://example.com/none", "x.pdf")
-    assert empty is None
+    # 7. 두 번째 호출은 캐시를 쓰므로 첨부를 다시 받지 않는다
+    StubSession.calls.clear()
+    collect_attachments(session, PAGE_URL, cache_dir=cache)
+    assert StubSession.calls.count(PAGE_URL) == 1, StubSession.calls
+    assert not any("FileDown" in u for u in StubSession.calls), \
+        f"캐시가 있는데 첨부를 다시 받음: {StubSession.calls}"
 
-    print("스크래퍼 테스트 통과 (첨부 선택 5개 항목)")
+    # 8. PDF 가 없는 페이지면 빈 목록
+    empty, _ = collect_attachments(session, "https://example.com/none", cache_dir=cache)
+    assert empty == []
+
+    shutil.rmtree(cache, ignore_errors=True)
+    print("스크래퍼 테스트 통과 (링크수집·파일명·유사도·1:1 배정·캐시 8개 항목)")
     return 0
 
 

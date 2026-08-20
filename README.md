@@ -42,11 +42,12 @@ python src/fetch_dataset.py
 #    → 300문항 / 64문서. context_type 라벨을 paragraph·table·image 로 통일하고
 #      원본 값은 context_type_raw 로 남긴다 (--no-normalize-context-type 로 해제)
 
-# 1. PDF 확보 — documents.csv 의 url 은 게시판 상세페이지이므로 첨부를 찾아 받는다
+# 1. PDF 확보 — url 은 게시판 상세페이지이므로 첨부를 찾아 받는다
 python src/download_pdfs.py
-#    → reports/download_log.csv (picked_name/name_score 로 어떤 첨부를 받았는지 확인)
-#    → reports/excluded_questions.csv (실패 문서에 걸린 제외 문항)
-#    원인 확인이 필요하면: python tools/diagnose_download.py
+#    → reports/needs_review.csv  ★ 파일명이 안 맞아 눈으로 봐야 하는 문서
+#    → reports/download_log.csv  어떤 첨부를 골랐는지(picked_name/name_score)
+#    → reports/excluded_questions.csv  실패 문서에 걸린 제외 문항
+#    첨부를 못 찾은 사이트가 있으면: python tools/inspect_html.py
 
 # 2. target 페이지만 파싱 — 먼저 5페이지로 품질 육안 검수
 python src/parse_vlm.py --limit 5 --save-image
@@ -104,10 +105,12 @@ reports/summary.md, summary_by_axis.csv  집계 리포트
 - **`documents.csv` 의 url 은 PDF 직링크가 아니다.** 기관 게시판의 게시글 상세페이지이고
   PDF 는 그 안의 첨부파일이다. 게다가 한 게시글에 첨부가 여러 개라 서로 다른 문서가
   **같은 URL** 을 갖는 경우가 있다 (예: 한국은행 `view.do?nttId=10082951` → `2024년 3월_2…`, `2024년 3월_3…`).
-  그래서 `download_pdfs.py` 는 페이지에서 첨부 링크를 모아 실제로 받아 보고,
-  Content-Disposition 파일명이 target 파일명과 가장 가까운 것을 고른다.
+  그래서 `download_pdfs.py` 는 **url 단위로 묶어서** 페이지의 PDF 첨부를 한 번만 전부 받아
+  `cache/attachments/` 에 저장한 뒤, 그 url 에 걸린 문서들에 **1:1 로 배정**한다
+  (유사도가 높은 쌍부터 확정 — 두 문서가 같은 첨부를 집는 사고를 막는다).
   선택 결과는 `download_log.csv` 의 `picked_name`·`name_score` 에 남고,
-  유사도가 0.6 미만이면 실행 로그에 경고가 뜬다 — **그 문서는 반드시 열어서 확인할 것**.
+  유사도 0.6 미만은 `status=review` + `reports/needs_review.csv` 로 분리된다
+  — **그 문서는 반드시 PDF 를 열어서 내용이 맞는지 확인할 것**.
 - HF repo 에는 PDF 가 없다 (csv·md 12개뿐). `--from-hf` 는 향후 repo 에 추가될 경우를 위한 옵션이다.
 
 - `context_type` 라벨이 도메인마다 흔들린다 — medical 은 paragraph 대신 `text`(45건)를 쓴다.
