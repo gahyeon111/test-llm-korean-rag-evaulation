@@ -64,6 +64,8 @@ def main() -> int:
                     help="이 유사도 미만이면 검수 대상으로 표시")
     ap.add_argument("--keep-html", type=int, default=5,
                     help="첨부를 못 찾은 페이지 본문을 몇 건까지 저장할지")
+    ap.add_argument("--follow-links", type=int, default=3,
+                    help="목록페이지로 보일 때 따라 들어갈 상세페이지 수 (0=사용 안 함)")
     ap.add_argument("--sleep", type=float, default=1.0, help="페이지 간 대기(초)")
     ap.add_argument("--force", action="store_true", help="이미 받은 PDF 도 다시 받기")
     args = ap.parse_args()
@@ -116,10 +118,14 @@ def main() -> int:
             continue
 
         attachments, meta = collect_attachments(
-            session, url, cache_dir=ATTACH_CACHE, timeout=args.timeout,
-            max_candidates=args.max_candidates)
+            session, url, cache_dir=ATTACH_CACHE, targets=pending,
+            timeout=args.timeout, max_candidates=args.max_candidates,
+            follow_links=args.follow_links, min_score=args.min_score)
         print(f"    페이지 {meta['page_status']} | 첨부 후보 {meta['n_candidates']} → "
               f"PDF {meta['n_attachments']}개")
+        for followed in meta["followed"]:
+            print(f"      ↳ 목록페이지로 보고 상세 진입: {followed['title'][:50]} "
+                  f"(PDF {followed['n_attachments']}개)")
 
         if not attachments:
             save_failed_html(session, url, pending[0], html_budget, args.timeout)
@@ -128,7 +134,8 @@ def main() -> int:
                 rows.append(base[t] | {
                     "file_name": t, "status": "failed",
                     "detail": f"PDF 첨부 없음 (page {meta['page_status']}, "
-                              f"후보 {meta['n_candidates']})",
+                              f"후보 {meta['n_candidates']}, "
+                              f"상세진입 {len(meta['followed'])})",
                     "n_attachments": 0})
             if args.sleep:
                 time.sleep(args.sleep)
