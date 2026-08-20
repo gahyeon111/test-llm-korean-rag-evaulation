@@ -63,6 +63,8 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=0.0, help="호출 간 대기(초)")
     ap.add_argument("--save-image", action="store_true", help="렌더 이미지도 저장(육안 검수)")
     ap.add_argument("--force", action="store_true", help="캐시 무시하고 재파싱")
+    ap.add_argument("--abort-after", type=int, default=3,
+                    help="연속 N회 실패하면 중단 (모델 ID 오류 등 설정 문제)")
     args = ap.parse_args()
 
     if args.dpi < 150:
@@ -87,6 +89,7 @@ def main() -> int:
 
     stats = {"ok": 0, "cached": 0, "failed": 0}
     failures = []
+    consecutive_failures = 0
     for i, pair in enumerate(pairs.itertuples(index=False), start=1):
         file_name = str(pair.target_file_name)
         page_no = int(pair.target_page_no)
@@ -115,7 +118,12 @@ def main() -> int:
         except (OpenRouterError, IndexError, RuntimeError) as exc:
             stats["failed"] += 1
             failures.append((file_name, page_no, str(exc)[:200]))
-            print(f"{tag} … 실패: {str(exc)[:160]}")
+            print(f"{tag} … 실패: {str(exc)[:300]}")
+            consecutive_failures += 1
+            if isinstance(exc, OpenRouterError) and consecutive_failures >= args.abort_after:
+                raise SystemExit(
+                    f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
+                    f"마지막 오류: {str(exc)[:400]}")
             continue
 
         out_path.write_text(json.dumps({
@@ -134,6 +142,7 @@ def main() -> int:
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
         stats["ok"] += 1
+        consecutive_failures = 0
         print(f"{tag} … ok ({len(result['text'])}자, {result['latency_s']}s)")
         if args.sleep:
             time.sleep(args.sleep)

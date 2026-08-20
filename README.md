@@ -16,7 +16,7 @@ LLM 도입 2차 평가 — 한국어 문서 QA **생성능력** 벤치마크 파
 | 항목 | 값 | 바꾸는 법 |
 |---|---|---|
 | API | OpenRouter 단일 키 (`OPENROUTER_API_KEY`) | `.env` |
-| 평가 대상 모델 | `deepseek/deepseek-v4-flash-0731` | `run_model.py --model` |
+| 평가 대상 모델 | `deepseek/deepseek-v4-flash-0731` * | `run_model.py --model` |
 | Provider 고정 | fp8 양자화, `allow_fallbacks: false` | `--quantization` / `--provider-order` |
 | Reasoning | high 단일 run (nested `reasoning.effort` 형식만 사용) | `run_model.py --reasoning` |
 | 파서 (VLM) | `google/gemini-3.1-pro`, target 페이지만 | `parse_vlm.py --model` |
@@ -24,6 +24,10 @@ LLM 도입 2차 평가 — 한국어 문서 QA **생성능력** 벤치마크 파
 | Context 구성 | target 페이지 단독 (±0) | — |
 | 생성 설정 | temperature 0 | `run_model.py --temperature` |
 
+> \* 모델 ID 는 스펙 기준값이다. OpenRouter 카탈로그에 없는 ID 면 400 이 나므로
+> `python tools/check_models.py` 로 먼저 확인하고 실제 ID 로 바꿔 쓴다.
+> 파싱/실행/채점 스크립트는 연속 3회 실패하면 설정 문제로 보고 중단한다(`--abort-after`).
+>
 > reasoning 은 `{"reasoning": {"effort": "high"}}` nested 형식으로만 전송한다.
 > flat 파라미터와 혼용하면 400 이 난다 (`src/common.py:chat_completion`).
 
@@ -54,6 +58,11 @@ python tools/review_downloads.py --render --write-exclusions
 #    → data/excluded_files.txt (파이프라인이 이 목록을 건너뛴다)
 #    → reports/download_review.md / review_pages/*.png 로 확인 후 줄을 지우면 복귀
 #    ✅ 만으로 돌리려면: --write-exclusions --keep-codes match
+
+# 1-2. 모델 ID 확인 — 스펙의 ID 가 OpenRouter 카탈로그에 없으면 400 이 난다
+python tools/check_models.py                     # 파서/평가대상/judge 3개 존재 확인
+python tools/check_models.py --search gemini     # 후보 찾기
+python tools/check_models.py --endpoints <모델>   # provider·양자화(fp8) 확인
 
 # 2. target 페이지만 파싱 — 먼저 5페이지로 품질 육안 검수
 python src/parse_vlm.py --limit 5 --save-image

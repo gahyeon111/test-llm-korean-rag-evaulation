@@ -56,6 +56,8 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=0.0)
     ap.add_argument("--out", default="")
     ap.add_argument("--force", action="store_true", help="기존 결과 무시하고 전부 재호출")
+    ap.add_argument("--abort-after", type=int, default=3,
+                    help="연속 N회 실패하면 중단 (모델 ID·provider 설정 오류 등)")
     args = ap.parse_args()
 
     api_key = require_api_key()
@@ -86,6 +88,7 @@ def main() -> int:
     run_at = datetime.now(timezone.utc).isoformat()
     rows: list[dict] = []
     n_failed = 0
+    consecutive_failures = 0
 
     for i, rec in enumerate(records, start=1):
         qid = rec["qid"]
@@ -120,7 +123,12 @@ def main() -> int:
                                 "latency_s": 0, "attempts": args.retries,
                                 "prompt_tokens": 0, "completion_tokens": 0,
                                 "reasoning_tokens": 0, "total_tokens": 0})
-            print(f"[{i}/{len(records)}] {qid} … 실패: {str(exc)[:160]}")
+            print(f"[{i}/{len(records)}] {qid} … 실패: {str(exc)[:300]}")
+            consecutive_failures += 1
+            if consecutive_failures >= args.abort_after:
+                raise SystemExit(
+                    f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
+                    f"마지막 오류: {str(exc)[:400]}")
             continue
 
         rows.append(base | {
@@ -128,6 +136,7 @@ def main() -> int:
             "provider": result["provider"], "latency_s": result["latency_s"],
             "attempts": result["attempts"], **result["usage"],
         })
+        consecutive_failures = 0
         print(f"[{i}/{len(records)}] {qid} … ok "
               f"({result['provider']}, {result['latency_s']}s, "
               f"reasoning {result['usage']['reasoning_tokens']}tok)")

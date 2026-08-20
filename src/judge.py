@@ -89,6 +89,8 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=0.0)
     ap.add_argument("--review-samples", type=int, default=40, help="수동 대조 샘플 수")
     ap.add_argument("--force", action="store_true", help="기존 채점 무시하고 재판정")
+    ap.add_argument("--abort-after", type=int, default=3,
+                    help="연속 N회 실패하면 중단 (judge 모델 ID 오류 등)")
     args = ap.parse_args()
 
     api_key = require_api_key()
@@ -111,6 +113,7 @@ def main() -> int:
 
         print(f"\n=== {raw_path.name} ({len(df)}건) ===")
         scored = []
+        consecutive_failures = 0
         for i, row in enumerate(df.to_dict("records"), start=1):
             qid = str(row["qid"])
             nm, n_total, n_hit = numeric_cross_check(row.get("target_answer", ""),
@@ -136,6 +139,13 @@ def main() -> int:
             except OpenRouterError as exc:
                 verdict = {"verdict": "JUDGE_FAILED", "judge_reason": str(exc)[:300],
                            "judge_latency_s": 0}
+                consecutive_failures += 1
+                if consecutive_failures >= args.abort_after:
+                    raise SystemExit(
+                        f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
+                        f"마지막 오류: {str(exc)[:400]}")
+            else:
+                consecutive_failures = 0
             scored.append(base | verdict)
             print(f"[{i}/{len(df)}] {qid} … {verdict['verdict']} (numeric={nm})")
             if args.sleep:

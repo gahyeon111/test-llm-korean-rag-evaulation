@@ -142,6 +142,9 @@ def chat_completion(
                 last_error = f"HTTP {resp.status_code}: {body}"
                 if resp.status_code not in RETRYABLE_STATUS:
                     # 400/401/402/404 는 요청 자체가 잘못된 것 — 재시도 무의미
+                    if "valid model" in body.lower() or "not found" in body.lower():
+                        last_error += ("\n  → 모델 ID 가 카탈로그에 없습니다. "
+                                       "`python tools/check_models.py` 로 확인하세요.")
                     raise OpenRouterError(last_error)
             else:
                 data = resp.json()
