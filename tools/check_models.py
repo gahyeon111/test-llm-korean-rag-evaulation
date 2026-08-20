@@ -45,13 +45,20 @@ def price_of(model: dict) -> str:
     return f"${prompt:.2f}/${completion:.2f} per 1M"
 
 
-def suggest(model_id: str, ids: list[str], n: int = 8) -> list[str]:
-    """카탈로그에 없을 때 대체 후보. 같은 계열(앞 토큰) 우선."""
+def suggest(model_id: str, ids: list[str], n: int = 10) -> list[str]:
+    """카탈로그에 없을 때 대체 후보. 같은 계열 안에서 이름이 가까운 순으로."""
     family = model_id.split("/")[0]
     keyword = model_id.split("/")[-1].split("-")[0]
     same = [i for i in ids if i.startswith(family + "/") and keyword in i]
+    # 알파벳순으로 자르면 구버전만 남는다 — 이름 유사도 순으로 정렬
+    same.sort(key=lambda i: -difflib.SequenceMatcher(None, model_id, i).ratio())
     close = difflib.get_close_matches(model_id, ids, n=n, cutoff=0.4)
     return list(dict.fromkeys(same + close))[:n]
+
+
+def is_vision(model: dict) -> bool:
+    modalities = (model.get("architecture") or {}).get("input_modalities") or []
+    return "image" in [str(m).lower() for m in modalities]
 
 
 def show_endpoints(api_key: str, model_id: str) -> None:
@@ -85,6 +92,8 @@ def show_endpoints(api_key: str, model_id: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--search", default="", help="모델 ID/이름에 이 문자열이 든 것만 나열")
+    ap.add_argument("--vision", action="store_true",
+                    help="이미지 입력이 가능한 모델만 (파서용 모델 고를 때)")
     ap.add_argument("--endpoints", default="", help="이 모델의 provider·양자화 조회")
     ap.add_argument("--limit", type=int, default=40)
     args = ap.parse_args()
@@ -102,9 +111,14 @@ def main() -> int:
         needle = args.search.lower()
         hits = [m for m in models
                 if needle in m["id"].lower() or needle in str(m.get("name", "")).lower()]
-        print(f"'{args.search}' 검색 결과 {len(hits)}건:")
+        if args.vision:
+            hits = [m for m in hits if is_vision(m)]
+        hits.sort(key=lambda m: m["id"])
+        print(f"'{args.search}' 검색 결과 {len(hits)}건"
+              + (" (이미지 입력 가능만)" if args.vision else "") + ":")
         for m in hits[:args.limit]:
-            print(f"  {m['id']:<52} {price_of(m)}")
+            tag = "[vision]" if is_vision(m) else "        "
+            print(f"  {m['id']:<50} {tag} {price_of(m)}")
         return 0
 
     ok = True
@@ -114,8 +128,10 @@ def main() -> int:
             continue
         ok = False
         print(f"❌ {label}: {model_id} — 카탈로그에 없음")
+        by_id = {m["id"]: m for m in models}
         for cand in suggest(model_id, ids):
-            print(f"     후보: {cand}")
+            tag = " [vision]" if is_vision(by_id.get(cand, {})) else ""
+            print(f"     후보: {cand}{tag}")
     if not ok:
         print("\n실제 ID 를 확인한 뒤 각 스크립트의 --model / --judge-model 로 지정하거나,")
         print("src/parse_vlm.py·run_model.py·judge.py 의 DEFAULT_* 상수를 고치세요.")
