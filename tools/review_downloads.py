@@ -22,7 +22,8 @@ import pandas as pd  # noqa: E402
 import pymupdf  # noqa: E402
 
 from attachment_scraper import name_similarity  # noqa: E402
-from common import DATASET_CSV, PDF_DIR, REPORT_DIR, pdf_path  # noqa: E402
+from common import (DATASET_CSV, EXCLUDED_FILES, PDF_DIR, REPORT_DIR,  # noqa: E402
+                    pdf_path)
 from judge import extract_dates, extract_numbers  # noqa: E402
 
 
@@ -100,6 +101,15 @@ def main() -> int:
     ap.add_argument("--preview-chars", type=int, default=400)
     ap.add_argument("--render", action="store_true",
                     help="확인이 필요한 문서의 첫 페이지를 PNG 로 저장 (스캔 PDF 눈검사용)")
+    ap.add_argument("--write-exclusions", action="store_true",
+                    help="data/excluded_files.txt 생성 (파이프라인이 이 목록을 건너뜀)")
+    ap.add_argument("--keep-codes", default="",
+                    help="이 판정만 남기고 나머지 전부 제외. 예: match")
+    ap.add_argument("--exclude-codes",
+                    default="page_out_of_range,missing_answer,no_file,open_failed",
+                    help="제외할 판정 코드 (쉼표 구분). "
+                         "선택지: match,page_mismatch,missing_answer,"
+                         "page_out_of_range,unverifiable,no_file,open_failed")
     args = ap.parse_args()
 
     log_path = REPORT_DIR / "download_log.csv"
@@ -121,17 +131,18 @@ def main() -> int:
                "name_score": getattr(item, "name_score", ""),
                "n_questions": len(questions), "page_count": "",
                "max_target_page": "", "pages_ok": "", "answer_hits": "",
-               "answer_checked": "", "answer_elsewhere": "", "verdict": ""}
+               "answer_checked": "", "answer_elsewhere": "", "code": "",
+               "verdict": ""}
 
         if not path.exists():
-            row["verdict"] = "파일 없음"
+            row["code"], row["verdict"] = "no_file", "파일 없음"
             rows.append(row)
             continue
 
         try:
             doc = pymupdf.open(path)
         except Exception as exc:  # noqa: BLE001
-            row["verdict"] = f"열기 실패: {exc}"
+            row["code"], row["verdict"] = "open_failed", f"열기 실패: {exc}"
             rows.append(row)
             continue
 
@@ -169,14 +180,19 @@ def main() -> int:
             png = render_target.get_pixmap(dpi=110).tobytes("png") if render_target else None
 
         if row["pages_ok"] is False:
+            row["code"] = "page_out_of_range"
             row["verdict"] = "❌ 다른 파일 (target 페이지가 PDF 범위 밖)"
         elif checked and hits / checked >= 0.5:
+            row["code"] = "match"
             row["verdict"] = "✅ 내용 일치 (정답 수치가 target 페이지에 있음)"
         elif checked and any("문서 어디에도 없음" not in e for e in elsewhere):
+            row["code"] = "page_mismatch"
             row["verdict"] = "🔁 문서는 맞는데 페이지가 어긋남 — 확인 필요"
         elif checked:
+            row["code"] = "missing_answer"
             row["verdict"] = "⚠️ 정답 수치가 문서에 없음 — 다른 파일 의심"
         else:
+            row["code"] = "unverifiable"
             row["verdict"] = "❓ 자동 대조 불가 (스캔 PDF 등) — 눈으로 확인"
         rows.append(row)
 
@@ -217,8 +233,39 @@ def main() -> int:
     for line in coverage_report(dataset):
         if line.startswith(("- ", "| ")) or line.startswith("### "):
             print(line)
+    if args.write_exclusions:
+        write_exclusions(result, args.keep_codes, args.exclude_codes)
+
     print(f"\n상세 → {REPORT_DIR / 'download_review.md'}")
     return 0
+
+
+def write_exclusions(result: pd.DataFrame, keep_codes: str, exclude_codes: str) -> None:
+    """제외 목록 파일 생성. 나중에 줄을 지우면 그 문서가 다시 평가에 들어온다."""
+    have_questions = result[result["n_questions"] > 0]
+    if keep_codes:
+        keep = {c.strip() for c in keep_codes.split(",") if c.strip()}
+        drop = have_questions[~have_questions["code"].isin(keep)]
+        rule = f"--keep-codes {keep_codes}"
+    else:
+        codes = {c.strip() for c in exclude_codes.split(",") if c.strip()}
+        drop = have_questions[have_questions["code"].isin(codes)]
+        rule = f"--exclude-codes {exclude_codes}"
+
+    lines = [
+        "# 평가에서 제외할 문서 목록 (parse_vlm / build_contexts 가 읽는다)",
+        f"# 생성: tools/review_downloads.py {rule}",
+        "# 확인 후 문제없다고 판단되면 해당 줄을 지우면 다시 평가에 포함된다.",
+        "",
+    ]
+    for row in drop.itertuples(index=False):
+        lines.append(f"{row.file_name}    # {row.code} / 문항 {row.n_questions}건")
+    EXCLUDED_FILES.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    kept = have_questions[~have_questions["file_name"].isin(drop["file_name"])]
+    print(f"\n제외 목록 작성 → {EXCLUDED_FILES}")
+    print(f"  제외 {len(drop)}개 문서 (문항 {int(drop['n_questions'].sum())}건) / "
+          f"평가 대상 {len(kept)}개 문서 (문항 {int(kept['n_questions'].sum())}건)")
 
 
 if __name__ == "__main__":

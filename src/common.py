@@ -31,6 +31,7 @@ REPORT_DIR = ROOT / "reports"
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
 DOCUMENTS_CSV = DATA_DIR / "documents.csv"
+EXCLUDED_FILES = DATA_DIR / "excluded_files.txt"
 DATASET_CSV = DATA_DIR / "dataset.csv"
 CONTEXTS_JSONL = CONTEXT_DIR / "contexts.jsonl"
 
@@ -258,6 +259,27 @@ def normalize_columns(df, aliases: dict[str, list[str]], *, required: Iterable[s
 # 리눅스/ext4 의 파일명 한도는 255 바이트. 한글은 UTF-8 에서 글자당 3바이트라
 # 85자만 넘어도 걸린다 (원본 데이터셋에 그런 파일명이 실제로 있다).
 MAX_FILENAME_BYTES = 240
+
+
+def nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", str(text)).strip()
+
+
+def load_excluded_files(path: Path | None = None) -> set[str]:
+    """평가에서 뺄 문서 목록 (data/excluded_files.txt).
+
+    한 줄에 target_file_name 하나. `#` 뒤는 주석이라 판정 근거를 적어둘 수 있고,
+    확인 후 줄을 지우면 그 문서가 다시 평가에 들어온다.
+    """
+    path = path or EXCLUDED_FILES
+    if not path.exists():
+        return set()
+    names = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            names.add(nfc(name))
+    return names
 
 
 def safe_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES) -> str:

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from common import (CONTEXT_DIR, CONTEXTS_JSONL, DATASET_CSV, REPORT_DIR,
-                    cache_path, write_jsonl)
+                    cache_path, load_excluded_files, nfc, write_jsonl)
 
 SCHEMA = ["qid", "domain", "context_type", "question", "target_answer",
           "target_file", "target_page", "context"]
@@ -90,9 +90,18 @@ def main() -> int:
     if "qid" not in dataset.columns:
         dataset.insert(0, "qid", [f"q{i:04d}" for i in range(1, len(dataset) + 1)])
 
+    excluded_files = load_excluded_files()
+    if excluded_files:
+        print(f"제외 목록: 문서 {len(excluded_files)}개 (data/excluded_files.txt)")
+
     rows, missing = [], []
     for item in dataset.itertuples(index=False):
         file_name = str(item.target_file_name)
+        if nfc(file_name) in excluded_files:
+            missing.append({"qid": item.qid, "target_file": file_name,
+                            "target_page": getattr(item, "target_page_no", ""),
+                            "reason": "제외 목록 (검수에서 제외)"})
+            continue
         page_raw = getattr(item, "target_page_no", None)
         page_no = int(page_raw) if pd.notna(page_raw) else -1
         cache_file = cache_path(file_name, page_no) if page_no >= 0 else None

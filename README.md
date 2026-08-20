@@ -49,6 +49,12 @@ python src/download_pdfs.py
 #    → reports/excluded_questions.csv  실패 문서에 걸린 제외 문항
 #    첨부를 못 찾은 사이트가 있으면: python tools/inspect_html.py
 
+# 1-1. 받은 PDF 가 그 문서가 맞는지 검증하고, 의심 건은 제외 목록으로 분리
+python tools/review_downloads.py --render --write-exclusions
+#    → data/excluded_files.txt (파이프라인이 이 목록을 건너뛴다)
+#    → reports/download_review.md / review_pages/*.png 로 확인 후 줄을 지우면 복귀
+#    ✅ 만으로 돌리려면: --write-exclusions --keep-codes match
+
 # 2. target 페이지만 파싱 — 먼저 5페이지로 품질 육안 검수
 python src/parse_vlm.py --limit 5 --save-image
 #    → cache/parsed/*.json 의 markdown 과 cache/pages/*.png 대조
@@ -96,6 +102,8 @@ reports/download_log.csv               문서별 성공/실패 + 걸린 문항 �
 reports/excluded_questions.csv         다운로드 실패로 제외된 문항
 reports/context_review_samples.md      게이트 A/B 검수용 샘플
 reports/judge_review_*.csv             judge 수동 대조 샘플
+reports/download_review.md             받은 PDF 내용 검증 (페이지 수·정답 대조)
+data/excluded_files.txt                평가에서 뺄 문서 목록 (직접 편집 가능)
 reports/parser_suspect_*.csv           image·table 오답의 모델 실패 vs 파서 실패 후보
 reports/summary.md, summary_by_axis.csv  집계 리포트
 ```
@@ -131,6 +139,21 @@ reports/summary.md, summary_by_axis.csv  집계 리포트
 **"모델 실패 vs 파서 실패" 구분**: image·table 오답에 대해 정답의 수치·날짜 토큰이 context 안에 있는지 검사한다.
 context 에 없으면 파서 실패 의심, 있으면 모델 실패 의심으로 분류하고 목록을 `reports/parser_suspect_*.csv` 로 뽑는다
 (1차 신호일 뿐이므로 최종 판단은 육안 확인).
+
+## 받은 PDF 검증 (`tools/review_downloads.py`)
+
+파일명만으로는 엉뚱한 첨부를 걸러낼 수 없어서 내용으로 확인한다.
+
+| 코드 | 뜻 | 조치 |
+|---|---|---|
+| `match` | 정답 수치가 target 페이지 텍스트에 있음 | 그대로 사용 |
+| `page_mismatch` | 정답이 다른 페이지에 있음 | 문서는 맞음. 페이지 지정을 확인 |
+| `missing_answer` | 정답이 문서 어디에도 없음 | 다른 파일 의심 |
+| `page_out_of_range` | target 페이지가 PDF 페이지 수를 넘음 | 확정적으로 다른 파일 |
+| `unverifiable` | 스캔 PDF 등 텍스트 대조 불가 | 첫 페이지를 눈으로 확인 (`--render`) |
+
+`--write-exclusions` 로 만든 `data/excluded_files.txt` 를 `parse_vlm` 과
+`build_contexts` 가 읽어 해당 문서 문항을 건너뛴다. 줄을 지우면 다시 포함된다.
 
 ## judge 신뢰도 보조 장치
 

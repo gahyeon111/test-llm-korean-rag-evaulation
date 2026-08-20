@@ -20,8 +20,8 @@ import pandas as pd
 import pymupdf
 
 from common import (CACHE_DIR, DATASET_CSV, OpenRouterError, PROMPT_DIR,
-                    cache_path, chat_completion, pdf_path, require_api_key,
-                    safe_filename, slugify)
+                    cache_path, chat_completion, load_excluded_files, nfc,
+                    pdf_path, require_api_key, safe_filename, slugify)
 
 DEFAULT_MODEL = "google/gemini-3.1-pro"
 PROMPT_VERSION = "parse_v1"
@@ -71,6 +71,12 @@ def main() -> int:
     api_key = require_api_key()
     prompt = (PROMPT_DIR / f"{PROMPT_VERSION}.txt").read_text(encoding="utf-8")
     dataset = pd.read_csv(DATASET_CSV)
+
+    excluded = load_excluded_files()
+    if excluded:
+        before = len(dataset)
+        dataset = dataset[~dataset["target_file_name"].map(nfc).isin(excluded)]
+        print(f"제외 목록 적용: 문서 {len(excluded)}개 → 문항 {before - len(dataset)}건 제외")
 
     pairs = (dataset[["target_file_name", "target_page_no"]]
              .dropna().drop_duplicates()
