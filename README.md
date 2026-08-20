@@ -19,12 +19,19 @@ LLM 도입 2차 평가 — 한국어 문서 QA **생성능력** 벤치마크 파
 | 평가 대상 모델 | `deepseek/deepseek-v4-flash-0731` * | `run_model.py --model` |
 | Provider 고정 | fp8 양자화, `allow_fallbacks: false` | `--quantization` / `--provider-order` |
 | Reasoning | high 단일 run (nested `reasoning.effort` 형식만 사용) | `run_model.py --reasoning` |
-| 파서 (VLM) | `google/gemini-3.1-pro`, target 페이지만 | `parse_vlm.py --model` |
+| 파서 (VLM) | `google/gemini-3.7-flash` *, target 페이지만 | `parse_vlm.py --model` |
 | Judge | `google/gemini-3.7-flash`, temperature 0 | `judge.py --judge-model` |
 | Context 구성 | target 페이지 단독 (±0) | — |
 | 생성 설정 | temperature 0 | `run_model.py --temperature` |
 
-> \* 모델 ID 는 스펙 기준값이다. OpenRouter 카탈로그에 없는 ID 면 400 이 나므로
+> \* **스펙 대비 변경**: 스펙의 `google/gemini-3.1-pro` 는 OpenRouter 카탈로그에 없다
+> (실제 ID 는 `google/gemini-3.1-pro-preview`, $2/$12 per 1M).
+> 파싱 100페이지 기준 pro 계열 ~$2.2 vs `gemini-3.7-flash` ~$0.8 이고,
+> 세대가 더 높은 flash 라 문서 파싱 품질도 크게 뒤지지 않아 기본값으로 잡았다.
+> 게이트 A 검수에서 표·차트 재현이 부족하면
+> `--model google/gemini-3.1-pro-preview` 로 올린다 (contexts 동결 전에 결정할 것).
+>
+> 모델 ID 는 스펙 기준값이다. OpenRouter 카탈로그에 없는 ID 면 400 이 나므로
 > `python tools/check_models.py` 로 먼저 확인하고 실제 ID 로 바꿔 쓴다.
 > 파싱/실행/채점 스크립트는 연속 3회 실패하면 설정 문제로 보고 중단한다(`--abort-after`).
 >
@@ -179,7 +186,7 @@ context 에 없으면 파서 실패 의심, 있으면 모델 실패 의심으로
 
 | 단계 | 규모 | 예상 |
 |---|---|---|
-| 파싱 (Gemini 3.1 Pro) | ~300 페이지 | ~$3–5 |
+| 파싱 (Gemini 3.7 Flash) | ~100 페이지 | ~$0.8 |
 | 대상 모델 (V4 Flash, high 1 run) | 300 호출 | ~$1–2 |
 | Judge (3.7 Flash) | 300 호출 | ~$0.5 |
 | 합계 | | ~$7 이내 |

@@ -22,7 +22,7 @@ from common import require_api_key  # noqa: E402
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 DEFAULTS = {
-    "파서 (parse_vlm)": "google/gemini-3.1-pro",
+    "파서 (parse_vlm)": "google/gemini-3.7-flash",
     "평가 대상 (run_model)": "deepseek/deepseek-v4-flash-0731",
     "judge (judge)": "google/gemini-3.7-flash",
 }

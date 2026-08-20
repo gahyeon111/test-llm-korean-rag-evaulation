@@ -23,7 +23,11 @@ from common import (CACHE_DIR, DATASET_CSV, OpenRouterError, PROMPT_DIR,
                     cache_path, chat_completion, load_excluded_files, nfc,
                     pdf_path, require_api_key, safe_filename, slugify)
 
-DEFAULT_MODEL = "google/gemini-3.1-pro"
+# 스펙의 google/gemini-3.1-pro 는 OpenRouter 카탈로그에 없다 (실제 ID 는
+# gemini-3.1-pro-preview, $2/$12 per 1M). 파싱 100페이지 기준 pro 계열 ~$2.2 vs
+# 3.7-flash ~$0.8 이고, 세대가 더 높은 flash 라 문서 파싱 품질도 크게 뒤지지 않는다.
+# 표·차트 재현이 부족하면 --model google/gemini-3.1-pro-preview 로 올린다.
+DEFAULT_MODEL = "google/gemini-3.7-flash"
 PROMPT_VERSION = "parse_v1"
 IMAGE_DIR = CACHE_DIR.parent / "pages"
 
