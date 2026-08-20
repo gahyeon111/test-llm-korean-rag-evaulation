@@ -21,8 +21,59 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import pandas as pd  # noqa: E402
 import pymupdf  # noqa: E402
 
-from common import DATASET_CSV, REPORT_DIR, pdf_path  # noqa: E402
+from attachment_scraper import name_similarity  # noqa: E402
+from common import DATASET_CSV, PDF_DIR, REPORT_DIR, pdf_path  # noqa: E402
 from judge import extract_dates, extract_numbers  # noqa: E402
+
+
+def answer_tokens(text: str) -> set[str]:
+    return set(extract_numbers(text)) | set(extract_dates(text))
+
+
+def find_answer_pages(page_texts: list[str], target_answer: str,
+                      page_base: int) -> list[int]:
+    """정답의 수치가 문서의 어느 페이지에 있는지. 페이지 오프셋 vs 다른 파일 구분용."""
+    tokens = answer_tokens(target_answer)
+    if not tokens:
+        return []
+    return [i + page_base for i, text in enumerate(page_texts)
+            if tokens & answer_tokens(text)]
+
+
+def coverage_report(dataset: pd.DataFrame) -> list[str]:
+    """문항이 가리키는 파일과 실제로 받은 파일이 어긋나 있는지 확인.
+
+    파일명이 조금만 달라도 문항이 통째로 제외되므로, 비슷한 이름이 디스크에
+    있으면 후보로 제시한다.
+    """
+    lines = ["## 파일명 대조", ""]
+    on_disk = sorted(p.name for p in PDF_DIR.glob("*.pdf"))
+    per_file = dataset.groupby("target_file_name").size()
+
+    missing = [(name, int(n)) for name, n in per_file.items()
+               if not pdf_path(name).exists()]
+    lines.append(f"- 문항이 가리키는 문서 {len(per_file)}개 중 PDF 확보 "
+                 f"{len(per_file) - len(missing)}개, 미확보 {len(missing)}개 "
+                 f"(문항 {sum(n for _, n in missing)}건)")
+
+    suggestions = []
+    for name, n in missing:
+        best = max(((name_similarity(name, disk), disk) for disk in on_disk),
+                   default=(0.0, ""))
+        if best[0] >= 0.7:
+            suggestions.append((name, n, best[1], round(best[0], 3)))
+    if suggestions:
+        lines += ["", "### ⚠️ 이름만 다른 파일이 디스크에 있을 수 있음", "",
+                  "| 문항이 찾는 파일 | 문항 수 | 디스크의 비슷한 파일 | 유사도 |",
+                  "|---|---|---|---|"]
+        lines += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in suggestions]
+
+    orphan = [p.name for p in PDF_DIR.glob("*.pdf")
+              if not any(pdf_path(f).name == p.name for f in per_file.index)]
+    if orphan:
+        lines += ["", f"- 받았지만 문항이 없는 문서 {len(orphan)}개 (평가와 무관): "
+                      + ", ".join(orphan[:10])]
+    return lines
 
 
 def page_text(doc: pymupdf.Document, page_no: int, page_base: int) -> str:
@@ -47,6 +98,8 @@ def main() -> int:
                     help="status=review 인 문서만 (기본: 받은 문서 전부)")
     ap.add_argument("--page-base", type=int, default=1)
     ap.add_argument("--preview-chars", type=int, default=400)
+    ap.add_argument("--render", action="store_true",
+                    help="확인이 필요한 문서의 첫 페이지를 PNG 로 저장 (스캔 PDF 눈검사용)")
     args = ap.parse_args()
 
     log_path = REPORT_DIR / "download_log.csv"
@@ -68,7 +121,7 @@ def main() -> int:
                "name_score": getattr(item, "name_score", ""),
                "n_questions": len(questions), "page_count": "",
                "max_target_page": "", "pages_ok": "", "answer_hits": "",
-               "answer_checked": "", "verdict": ""}
+               "answer_checked": "", "answer_elsewhere": "", "verdict": ""}
 
         if not path.exists():
             row["verdict"] = "파일 없음"
@@ -89,7 +142,9 @@ def main() -> int:
             row["pages_ok"] = (int(pages.max()) - args.page_base < doc.page_count
                                if len(pages) else True)
 
+            page_texts = [doc.load_page(i).get_text() for i in range(doc.page_count)]
             hits = checked = 0
+            elsewhere: list[str] = []
             for q in questions.itertuples(index=False):
                 page_no = pd.to_numeric(q.target_page_no, errors="coerce")
                 if pd.isna(page_no):
@@ -100,44 +155,68 @@ def main() -> int:
                     continue
                 checked += 1
                 hits += int(result)
+                if not result:
+                    found = find_answer_pages(page_texts, q.target_answer,
+                                              args.page_base)
+                    elsewhere.append(
+                        f"{q.qid}: target p{int(page_no)} → 정답 수치가 "
+                        + (f"p{', p'.join(str(x) for x in found[:5])} 에 있음"
+                           if found else "문서 어디에도 없음"))
             row["answer_hits"], row["answer_checked"] = hits, checked
-            preview = " ".join(page_text(doc, args.page_base, args.page_base).split())
+            row["answer_elsewhere"] = " / ".join(elsewhere[:5])
+            preview = " ".join(page_texts[0].split()) if page_texts else ""
+            render_target = doc.load_page(0) if (args.render and doc.page_count) else None
+            png = render_target.get_pixmap(dpi=110).tobytes("png") if render_target else None
 
         if row["pages_ok"] is False:
             row["verdict"] = "❌ 다른 파일 (target 페이지가 PDF 범위 밖)"
         elif checked and hits / checked >= 0.5:
             row["verdict"] = "✅ 내용 일치 (정답 수치가 target 페이지에 있음)"
+        elif checked and any("문서 어디에도 없음" not in e for e in elsewhere):
+            row["verdict"] = "🔁 문서는 맞는데 페이지가 어긋남 — 확인 필요"
         elif checked:
-            row["verdict"] = "⚠️ 정답 수치 불일치 — 확인 필요"
+            row["verdict"] = "⚠️ 정답 수치가 문서에 없음 — 다른 파일 의심"
         else:
             row["verdict"] = "❓ 자동 대조 불가 (스캔 PDF 등) — 눈으로 확인"
         rows.append(row)
 
-        if row["verdict"].startswith(("✅",)) and str(item.status) == "ok":
+        if row["verdict"].startswith("✅") and str(item.status) == "ok":
             continue   # 문제없는 건 상세 섹션에서 생략
+        if png:
+            page_dir = REPORT_DIR / "review_pages"
+            page_dir.mkdir(parents=True, exist_ok=True)
+            (page_dir / (Path(file_name).stem[:60] + ".png")).write_bytes(png)
         sections.append(
             f"### {file_name}\n\n"
             f"- 판정: **{row['verdict']}**\n"
             f"- 받은 첨부: `{row['picked_name']}` (파일명 유사도 {row['name_score']})\n"
             f"- 페이지 수 {row['page_count']} / 문항이 가리키는 최대 페이지 "
             f"{row['max_target_page']} / 문항 {row['n_questions']}건\n"
-            f"- 정답 대조: {row['answer_hits']}/{row['answer_checked']}건 일치\n\n"
+            f"- 정답 대조: {row['answer_hits']}/{row['answer_checked']}건 일치\n"
+            + (f"- 불일치 문항: {row['answer_elsewhere']}\n" if row.get("answer_elsewhere") else "")
+            + "\n"
             f"첫 페이지 미리보기:\n\n> {preview[:args.preview_chars] or '(텍스트 없음 — 스캔 PDF)'}\n")
 
     result = pd.DataFrame(rows)
     result.to_csv(REPORT_DIR / "download_review.csv", index=False)
     md = ["# 다운로드 검수 리포트", "",
           f"대상 {len(result)}건", "",
-          "## 판정 요약", "",
-          result["verdict"].value_counts().to_string(), "",
-          "## 확인이 필요한 문서", ""] + sections
+          "## 판정 요약", "", "```",
+          result["verdict"].value_counts().to_string(), "```", ""]
+    md += coverage_report(dataset) + ["", "## 확인이 필요한 문서", ""] + sections
     (REPORT_DIR / "download_review.md").write_text("\n".join(md), encoding="utf-8")
 
     print(result["verdict"].value_counts().to_string())
-    bad = result[~result["verdict"].str.startswith("✅")]
+    bad = result[(~result["verdict"].str.startswith("✅")) & (result["n_questions"] > 0)]
+    skip = result[(~result["verdict"].str.startswith("✅")) & (result["n_questions"] == 0)]
+    if len(skip):
+        print(f"\n(문항이 0건이라 볼 필요 없는 문서 {len(skip)}개는 제외)")
     if len(bad):
-        print(f"\n확인 필요 {len(bad)}건 (문항 {bad['n_questions'].sum()}건):")
-        print(bad[["file_name", "n_questions", "name_score", "verdict"]].to_string(index=False))
+        print(f"\n실제로 확인이 필요한 문서 {len(bad)}건 (문항 {bad['n_questions'].sum()}건):")
+        print(bad[["file_name", "n_questions", "verdict"]].to_string(index=False))
+    for line in coverage_report(dataset):
+        if line.startswith(("- ", "| ")) or line.startswith("### "):
+            print(line)
     print(f"\n상세 → {REPORT_DIR / 'download_review.md'}")
     return 0
 
