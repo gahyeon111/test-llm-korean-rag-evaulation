@@ -167,7 +167,7 @@ python src/report.py           # 모든 run 집계 + 모델 간 비교표
 
 | 단계 | 인자 | 출력 |
 |---|---|---|
-| `run_model.py` | `--model` `--reasoning` `--quantization` `--out` | `results/raw/openrouter__<벤더-모델>__<reasoning>.csv` |
+| `run_model.py` | `--model` `--reasoning` `--quantization` `--extra-body` `--out` | `results/raw/openrouter__<벤더-모델>__<reasoning>.csv` |
 | `judge.py` | `--input` `--judge-model` `--tag` | `results/scored/<raw 파일명>.csv` |
 | `report.py` | `--runs` `--out` | `reports/<out>.md`, `reports/<out>_by_axis.csv` |
 
@@ -180,6 +180,18 @@ python src/report.py           # 모든 run 집계 + 모델 간 비교표
   채점 결과가 2개 이상이면 마지막에 **모델 간 비교표**가 자동으로 붙는다.
 - 모델 답변이 바뀌면(재실행 등) judge 는 예전 판정을 재사용하지 않는다
   (qid 가 아니라 qid+답변으로 캐시를 맞춘다).
+
+## reasoning 설정 (하이브리드 모델 주의)
+
+| `--reasoning` | 전송 내용 | 쓰는 경우 |
+|---|---|---|
+| `none` | 파라미터 미전송 | 모델 기본값을 그대로 쓸 때. **하이브리드 모델은 기본이 thinking on 이라 추론한다** |
+| `off` | `{"reasoning": {"enabled": false}}` | 추론을 명시적으로 끌 때 (non-thinking 모델과 조건을 맞출 때) |
+| `low`/`medium`/`high` | `{"reasoning": {"effort": …}}` | 추론 강도를 지정할 때 |
+
+`run_model.py` 는 실행 후 실제 발생한 reasoning 토큰을 집계해, 껐다고 했는데 추론이
+일어났거나 켰는데 0 이면 경고한다. provider 가 `reasoning.enabled` 를 안 받으면
+`--extra-body '{"chat_template_kwargs":{"enable_thinking":false}}'` 로 우회한다.
 
 ## 모델 간 차이가 유의미한지
 

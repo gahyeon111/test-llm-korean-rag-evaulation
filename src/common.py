@@ -98,6 +98,7 @@ def chat_completion(
     provider: dict[str, Any] | None = None,
     max_tokens: int | None = None,
     response_format: dict[str, Any] | None = None,
+    extra_body: dict[str, Any] | None = None,
     retries: int = 3,
     timeout: int = 300,
     api_key: str | None = None,
@@ -107,6 +108,12 @@ def chat_completion(
     reasoning 은 반드시 nested 형식(``{"reasoning": {"effort": "high"}}``)으로만 보낸다.
     flat 파라미터(``reasoning_effort``)와 혼용하면 400 이 난다.
 
+    reasoning_effort 값의 의미:
+      None    파라미터를 보내지 않는다 → **모델 기본값**을 따른다.
+              하이브리드 모델(기본 thinking on)은 이때 그대로 추론한다.
+      "off"   ``{"reasoning": {"enabled": false}}`` 로 추론을 끈다.
+      그 외    ``{"reasoning": {"effort": <값>}}``
+
     반환: {text, raw, latency_s, provider, usage, attempts, error}
     """
     key = api_key or require_api_key()
@@ -115,7 +122,9 @@ def chat_completion(
         "messages": messages,
         "temperature": temperature,
     }
-    if reasoning_effort:
+    if reasoning_effort == "off":
+        payload["reasoning"] = {"enabled": False}
+    elif reasoning_effort:
         payload["reasoning"] = {"effort": reasoning_effort}
     if provider:
         payload["provider"] = provider
@@ -123,6 +132,8 @@ def chat_completion(
         payload["max_tokens"] = max_tokens
     if response_format:
         payload["response_format"] = response_format
+    if extra_body:
+        payload.update(extra_body)
 
     headers = {
         "Authorization": f"Bearer {key}",

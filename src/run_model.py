@@ -49,8 +49,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--reasoning", default="high",
-                    choices=["none", "low", "medium", "high"],
-                    help="reasoning.effort (nested 형식으로만 전송)")
+                    choices=["none", "off", "low", "medium", "high"],
+                    help="none=파라미터 미전송(모델 기본값 그대로), "
+                         "off=추론 끄기(reasoning.enabled=false), "
+                         "low/medium/high=reasoning.effort")
     ap.add_argument("--contexts", default=str(CONTEXTS_JSONL))
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--quantization", default="fp8", help="빈 문자열이면 provider 고정 해제")
@@ -59,6 +61,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="드라이런용 N문항")
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--sleep", type=float, default=0.0)
+    ap.add_argument("--extra-body", default="",
+                    help='요청 본문에 합칠 JSON. provider 별 옵션용 '
+                         '(예: \'{"chat_template_kwargs":{"enable_thinking":false}}\')')
     ap.add_argument("--out", default="")
     ap.add_argument("--force", action="store_true", help="기존 결과 무시하고 전부 재호출")
     ap.add_argument("--abort-after", type=int, default=3,
@@ -81,6 +86,7 @@ def main() -> int:
         allow_fallbacks=args.allow_fallbacks,
     )
     reasoning_effort = None if args.reasoning == "none" else args.reasoning
+    extra_body = json.loads(args.extra_body) if args.extra_body else None
     out_path = Path(args.out) if args.out else output_path(args.model, args.reasoning)
 
     done: dict[str, dict] = {}
@@ -118,6 +124,7 @@ def main() -> int:
                 temperature=args.temperature,
                 reasoning_effort=reasoning_effort,
                 provider=provider or None,
+                extra_body=extra_body,
                 retries=args.retries,
                 api_key=api_key,
             )
@@ -160,6 +167,25 @@ def main() -> int:
     print(routed.to_string() if len(routed) else "  (없음)")
     if len(routed) > 1:
         print("경고: provider 가 여러 개로 섞였습니다 — 양자화 오염 여부를 확인하세요.")
+
+    # 하이브리드 모델은 기본이 thinking on 이라, 끈 줄 알았는데 계속 추론하는 경우가 있다.
+    ok_rows = df[df["status"] == "ok"]
+    reasoning_tokens = pd.to_numeric(ok_rows.get("reasoning_tokens", 0),
+                                     errors="coerce").fillna(0)
+    n_reasoned = int((reasoning_tokens > 0).sum())
+    if args.reasoning in ("none", "off") and n_reasoned:
+        print(f"\n⚠️ reasoning={args.reasoning} 인데 {n_reasoned}/{len(ok_rows)}건에서 "
+              f"reasoning 토큰이 발생했습니다 (평균 {reasoning_tokens.mean():.0f}).")
+        print("   하이브리드 모델의 기본 thinking 이 그대로 적용됐을 수 있습니다 — "
+              "`--reasoning off` 또는")
+        print("   `--extra-body '{\"chat_template_kwargs\":{\"enable_thinking\":false}}'` "
+              "로 끄고 --force 로 다시 돌리세요.")
+    elif args.reasoning not in ("none", "off") and not n_reasoned:
+        print(f"\n⚠️ reasoning={args.reasoning} 인데 reasoning 토큰이 0입니다 — "
+              "이 모델/provider 가 reasoning 을 지원하는지 확인하세요.")
+    else:
+        print(f"reasoning 토큰 발생: {n_reasoned}/{len(ok_rows)}건 "
+              f"(평균 {reasoning_tokens.mean():.0f})")
     return 0
 
 
