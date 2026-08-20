@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +49,47 @@ def answer_support(contexts: dict[str, str], row: pd.Series) -> str:
     if not missing:
         return "IN_CONTEXT"
     return "MISSING" if len(missing) == len(targets) else "PARTIAL"
+
+
+def mcnemar_p(b: int, c: int) -> float:
+    """McNemar 정확검정(양측). b, c 는 두 모델의 판정이 엇갈린 문항 수.
+
+    같은 문항을 같은 context 로 풀었으므로 짝지은 비교가 맞다.
+    전체 정확도 차이만 보면 표본이 작을 때 우연을 실력으로 오독하기 쉽다.
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) * (0.5 ** n)
+    return min(1.0, 2 * tail)
+
+
+def pairwise_comparison(runs: dict[str, pd.DataFrame]) -> list[str]:
+    """run 두 개씩 짝지어 문항 단위로 비교한다."""
+    names = list(runs)
+    if len(names) < 2:
+        return []
+    lines = ["### 짝지은 비교 (같은 문항 기준)", "",
+             "| A | B | A만 정답 | B만 정답 | 둘 다 정답 | 둘 다 오답 | 차이 | p (McNemar) |",
+             "|---|---|---|---|---|---|---|---|"]
+    for i, a in enumerate(names):
+        for b_name in names[i + 1:]:
+            da = {str(r["qid"]): r["verdict"] for _, r in runs[a].iterrows()}
+            db = {str(r["qid"]): r["verdict"] for _, r in runs[b_name].iterrows()}
+            shared = [q for q in da if q in db and da[q] in "OX" and db[q] in "OX"]
+            only_a = sum(1 for q in shared if da[q] == "O" and db[q] == "X")
+            only_b = sum(1 for q in shared if da[q] == "X" and db[q] == "O")
+            both = sum(1 for q in shared if da[q] == db[q] == "O")
+            neither = len(shared) - only_a - only_b - both
+            diff = (only_a - only_b) / len(shared) if shared else 0
+            p = mcnemar_p(only_a, only_b)
+            verdict = "유의미" if p < 0.05 else "표본으로는 판단 불가"
+            lines.append(f"| {a} | {b_name} | {only_a} | {only_b} | {both} | {neither} | "
+                         f"{diff:+.1%} | {p:.3f} ({verdict}) |")
+    lines += ["", "p ≥ 0.05 면 두 모델의 차이를 이 표본(문항 수)으로는 확정할 수 없다는 뜻이다. "
+              "그 경우 정확도 숫자만으로 우열을 결론짓지 말 것.", ""]
+    return lines
 
 
 def md_table(df: pd.DataFrame) -> str:
@@ -100,8 +142,10 @@ def main() -> int:
              "Allganize 공식 리더보드와 직접 비교 불가 — 후보 모델 간 상대 비교 전용", ""]
 
     axis_rows = []
+    run_frames: dict[str, pd.DataFrame] = {}
     for section_no, path in enumerate(files, start=1):
         df = pd.read_csv(path).fillna("")
+        run_frames[path.stem] = df
         run = path.stem
         model = df["model"].iloc[0] if "model" in df.columns and len(df) else run
         effort = df["reasoning_effort"].iloc[0] if "reasoning_effort" in df.columns and len(df) else ""
@@ -174,6 +218,7 @@ def main() -> int:
                                     values="accuracy").round(4).reset_index()
         lines += [f"## {len(files) + 1}. 모델 간 비교 (accuracy)", "",
                   md_table(pivot), ""]
+        lines += pairwise_comparison(run_frames)
 
     summary_path = REPORT_DIR / f"{args.out}.md"
     summary_path.write_text("\n".join(lines), encoding="utf-8")
