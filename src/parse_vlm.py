@@ -62,11 +62,17 @@ def main() -> int:
     ap.add_argument("--dpi", type=int, default=200, help="≥150 권장")
     ap.add_argument("--page-base", type=int, default=1,
                     help="target_page_no 의 시작값 (1=1-based, 0=0-based)")
-    ap.add_argument("--limit", type=int, default=0, help="선행 검수용 N페어만 처리")
+    ap.add_argument("--limit", type=int, default=0, help="앞에서부터 N페어만 처리")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="문서를 골고루 섞어 N페어만 (게이트 A 검수용)")
+    ap.add_argument("--types", default="",
+                    help="이 context_type 문항이 걸린 페이지만. 예: image,table")
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--sleep", type=float, default=0.0, help="호출 간 대기(초)")
     ap.add_argument("--save-image", action="store_true", help="렌더 이미지도 저장(육안 검수)")
     ap.add_argument("--force", action="store_true", help="캐시 무시하고 재파싱")
+    ap.add_argument("--retry-empty", action="store_true",
+                    help="markdown 이 빈 캐시를 지워 다시 파싱하게 한다")
     ap.add_argument("--abort-after", type=int, default=3,
                     help="연속 N회 실패하면 중단 (모델 ID 오류 등 설정 문제)")
     args = ap.parse_args()
@@ -75,6 +81,19 @@ def main() -> int:
         raise SystemExit("dpi 는 150 이상이어야 합니다 (스펙 §4.2).")
 
     api_key = require_api_key()
+
+    if args.retry_empty:
+        dropped = 0
+        for cached in CACHE_DIR.glob("*.json"):
+            try:
+                data = json.loads(cached.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+            if not str(data.get("markdown", "")).strip():
+                cached.unlink()
+                dropped += 1
+        print(f"빈 캐시 {dropped}건 삭제 — 이번 실행에서 다시 파싱합니다")
+
     prompt = (PROMPT_DIR / f"{PROMPT_VERSION}.txt").read_text(encoding="utf-8")
     dataset = pd.read_csv(DATASET_CSV)
 
@@ -99,7 +118,27 @@ def main() -> int:
         pairs = pairs[has_pdf]
     print(f"  → 실제 파싱 대상: {len(pairs)}페어 "
           f"(문서 {pairs['target_file_name'].nunique()}개)")
-    if args.limit:
+
+    if args.types:
+        wanted = {t.strip() for t in args.types.split(",") if t.strip()}
+        keys = (dataset[dataset["context_type"].isin(wanted)]
+                [["target_file_name", "target_page_no"]].drop_duplicates())
+        pairs = pairs.merge(keys, on=["target_file_name", "target_page_no"])
+        print(f"  → context_type {sorted(wanted)} 페이지만: {len(pairs)}페어")
+
+    if args.sample:
+        # 앞에서부터 자르면 한 문서에 몰린다. 문서를 돌아가며 하나씩 뽑는다.
+        groups = [g for _, g in pairs.groupby("target_file_name", sort=True)]
+        picked, depth = [], 0
+        while len(picked) < args.sample and any(depth < len(g) for g in groups):
+            for group in groups:
+                if depth < len(group) and len(picked) < args.sample:
+                    picked.append(group.iloc[depth])
+            depth += 1
+        pairs = pd.DataFrame(picked)
+        print(f"  → 샘플: {len(pairs)}페어 "
+              f"(문서 {pairs['target_file_name'].nunique()}개에 걸쳐 추출)")
+    elif args.limit:
         pairs = pairs.head(args.limit)
 
     stats = {"ok": 0, "cached": 0, "failed": 0}
@@ -141,6 +180,20 @@ def main() -> int:
                     f"마지막 오류: {str(exc)[:400]}")
             continue
 
+        text = (result["text"] or "").strip()
+        if not text:
+            # 빈 응답을 캐시하면 재실행해도 스킵돼 그대로 굳는다. 캐시하지 않고 실패 처리.
+            choice = (result["raw"].get("choices") or [{}])[0]
+            reason = (choice.get("finish_reason")
+                      or choice.get("native_finish_reason") or "?")
+            stats["failed"] += 1
+            failures.append((file_name, page_no, f"빈 응답 (finish_reason={reason})"))
+            print(f"{tag} … 빈 응답 (finish_reason={reason}) → 캐시하지 않음, 재실행 시 재시도")
+            (CACHE_DIR / "empty_responses").mkdir(parents=True, exist_ok=True)
+            (CACHE_DIR / "empty_responses" / out_path.name).write_text(
+                json.dumps(result["raw"], ensure_ascii=False, indent=2), encoding="utf-8")
+            continue
+
         out_path.write_text(json.dumps({
             "file_name": file_name,
             "page_no": page_no,
@@ -149,7 +202,7 @@ def main() -> int:
             "dpi": args.dpi,
             "page_base": args.page_base,
             "parsed_at": datetime.now(timezone.utc).isoformat(),
-            "markdown": result["text"],
+            "markdown": text,
             "usage": result["usage"],
             "latency_s": result["latency_s"],
             "provider": result["provider"],
@@ -158,7 +211,7 @@ def main() -> int:
 
         stats["ok"] += 1
         consecutive_failures = 0
-        print(f"{tag} … ok ({len(result['text'])}자, {result['latency_s']}s)")
+        print(f"{tag} … ok ({len(text)}자, {result['latency_s']}s)")
         if args.sleep:
             time.sleep(args.sleep)
 

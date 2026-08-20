@@ -71,8 +71,11 @@ python tools/check_models.py                     # 파서/평가대상/judge 3�
 python tools/check_models.py --search gemini     # 후보 찾기
 python tools/check_models.py --endpoints <모델>   # provider·양자화(fp8) 확인
 
-# 2. target 페이지만 파싱 — 먼저 5페이지로 품질 육안 검수
-python src/parse_vlm.py --limit 5 --save-image
+# 2. target 페이지만 파싱 — 먼저 문서를 흩어 샘플로 품질 육안 검수
+python src/parse_vlm.py --sample 10 --save-image
+#    --limit 은 앞에서부터 잘라 한 문서에 몰리므로, 검수에는 --sample 을 쓴다
+#    표·차트 품질만 집중해서 보려면: --sample 10 --types image,table
+#    빈 응답이 캐시에 남았으면: --retry-empty
 #    → cache/parsed/*.json 의 markdown 과 cache/pages/*.png 대조
 #    ★ 게이트 A: 표·차트 변환 품질 확인 후 전체 실행
 python src/parse_vlm.py
