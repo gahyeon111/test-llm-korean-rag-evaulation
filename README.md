@@ -42,9 +42,11 @@ python src/fetch_dataset.py
 #    → 300문항 / 64문서. context_type 라벨을 paragraph·table·image 로 통일하고
 #      원본 값은 context_type_raw 로 남긴다 (--no-normalize-context-type 로 해제)
 
-# 1. PDF 다운로드 (URL 만료 문서 = 평가 제외 문항 확정)
-python src/download_pdfs.py
+# 1. PDF 확보 — HF repo 안에 원본 PDF 가 있으면 그쪽이 우선(URL 만료 없음)
+python tools/diagnose_download.py     # repo 에 PDF 가 있는지 + URL 응답 정체 확인
+python src/download_pdfs.py --from-hf # repo 에 있으면 이걸로, 없으면 인자 없이 URL 다운로드
 #    → reports/download_log.csv, reports/excluded_questions.csv 확인
+#    실패 응답 본문은 reports/failed_html/ 에 저장되니 열어서 원인을 본다
 
 # 2. target 페이지만 파싱 — 먼저 5페이지로 품질 육안 검수
 python src/parse_vlm.py --limit 5 --save-image
