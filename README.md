@@ -150,6 +150,37 @@ reports/summary.md, summary_by_axis.csv  집계 리포트
   `fetch_dataset.py` 실행 로그와 `reports/context_missing.csv` 에 qid 가 남는다.
   → 실제 평가 모수는 300 − (페이지 결측) − (PDF 다운로드 실패) 문항이다.
 
+## 모델을 여러 개 비교할 때
+
+세 단계 모두 모델/출력이 파일 단위로 분리된다. `contexts.jsonl` 이 동결돼 있으므로
+파싱 비용은 재발생하지 않고, 추가 모델은 실행·채점 비용만 든다.
+
+```bash
+# 모델 A
+python src/run_model.py --model deepseek/deepseek-v4-flash-0731 --reasoning high
+# 모델 B (같은 contexts, 같은 프롬프트)
+python src/run_model.py --model google/gemini-3.7-flash --reasoning high
+
+python src/judge.py            # results/raw/*.csv 를 모두 채점 (이미 채점된 건 건너뜀)
+python src/report.py           # 모든 run 집계 + 모델 간 비교표
+```
+
+| 단계 | 인자 | 출력 |
+|---|---|---|
+| `run_model.py` | `--model` `--reasoning` `--quantization` `--out` | `results/raw/openrouter__<벤더-모델>__<reasoning>.csv` |
+| `judge.py` | `--input` `--judge-model` `--tag` | `results/scored/<raw 파일명>.csv` |
+| `report.py` | `--runs` `--out` | `reports/<out>.md`, `reports/<out>_by_axis.csv` |
+
+- run 파일명에 **벤더까지** 넣는다 (`meta-llama/llama-3.3-70b` 와 `nvidia/llama-3.3-70b`
+  처럼 뒷부분이 겹칠 수 있다). 같은 모델을 reasoning 만 바꿔 돌리면 파일이 자동으로 갈린다.
+- `judge.py` 는 `results/raw/*.csv` 를 전부 훑고 이미 채점된 문항은 건너뛴다.
+  특정 run 만 채점하려면 `--input results/raw/<파일>.csv`.
+  judge 를 바꿔 재채점할 때는 `--tag` 로 결과를 분리한다.
+- `report.py --runs '*deepseek*'` 처럼 일부만 골라 따로 리포트를 낼 수 있다.
+  채점 결과가 2개 이상이면 마지막에 **모델 간 비교표**가 자동으로 붙는다.
+- 모델 답변이 바뀌면(재실행 등) judge 는 예전 판정을 재사용하지 않는다
+  (qid 가 아니라 qid+답변으로 캐시를 맞춘다).
+
 ## 리포트 집계 축
 
 전체 / domain(5개) / context_type(paragraph·table·image). 제외 문항 수를 함께 명시하고,

@@ -63,11 +63,17 @@ def main() -> int:
     ap.add_argument("--scored-dir", default=str(RESULT_SCORED_DIR))
     ap.add_argument("--contexts", default=str(CONTEXTS_JSONL))
     ap.add_argument("--suspect-samples", type=int, default=20)
+    ap.add_argument("--runs", default="*.csv",
+                    help="집계할 채점 결과 파일 패턴 (예: '*deepseek*'). 기본: 전부")
+    ap.add_argument("--out", default="summary",
+                    help="리포트 파일명 접두사 → reports/<out>.md, <out>_by_axis.csv")
     args = ap.parse_args()
 
-    files = sorted(Path(args.scored_dir).glob("*.csv"))
+    pattern = args.runs if args.runs.endswith(".csv") else f"{args.runs}.csv"
+    files = sorted(Path(args.scored_dir).glob(pattern))
     if not files:
-        raise SystemExit("채점 결과가 없습니다. judge.py 를 먼저 실행하세요.")
+        raise SystemExit(f"채점 결과가 없습니다 (패턴: {pattern}). judge.py 를 먼저 실행하세요.")
+    print(f"집계 대상 {len(files)}개 run: " + ", ".join(f.stem for f in files))
 
     contexts_path = Path(args.contexts)
     contexts = ({r["qid"]: r["context"] for r in read_jsonl(contexts_path)}
@@ -94,7 +100,7 @@ def main() -> int:
              "Allganize 공식 리더보드와 직접 비교 불가 — 후보 모델 간 상대 비교 전용", ""]
 
     axis_rows = []
-    for path in files:
+    for section_no, path in enumerate(files, start=1):
         df = pd.read_csv(path).fillna("")
         run = path.stem
         model = df["model"].iloc[0] if "model" in df.columns and len(df) else run
@@ -104,7 +110,7 @@ def main() -> int:
         n_failed = int((df.get("status", pd.Series(dtype=str)) == "failed").sum())
         n_judge_failed = int((~df["verdict"].isin(["O", "X"])).sum())
 
-        lines += [f"## 1. {run}", "",
+        lines += [f"## {section_no}. {run}", "",
                   f"- 모델: `{model}` / reasoning: `{effort}` / temperature: "
                   f"{df['temperature'].iloc[0] if 'temperature' in df.columns and len(df) else '-'}",
                   f"- 라우팅된 provider: {', '.join(f'{k}({v})' for k, v in providers.items()) or '-'}"
@@ -161,17 +167,18 @@ def main() -> int:
                       f"(상위 {args.suspect_samples}건은 육안 확인 권장)", ""]
 
     axis_df = pd.DataFrame(axis_rows)
-    axis_df.to_csv(REPORT_DIR / "summary_by_axis.csv", index=False)
+    axis_df.to_csv(REPORT_DIR / f"{args.out}_by_axis.csv", index=False)
 
     if axis_df["run"].nunique() > 1:
         pivot = axis_df.pivot_table(index=["axis", "group"], columns="run",
                                     values="accuracy").round(4).reset_index()
-        lines += ["## 2. 모델 간 비교 (accuracy)", "", md_table(pivot), ""]
+        lines += [f"## {len(files) + 1}. 모델 간 비교 (accuracy)", "",
+                  md_table(pivot), ""]
 
-    summary_path = REPORT_DIR / "summary.md"
+    summary_path = REPORT_DIR / f"{args.out}.md"
     summary_path.write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
-    print(f"\n저장: {summary_path}, {REPORT_DIR / 'summary_by_axis.csv'}")
+    print(f"\n저장: {summary_path}, {REPORT_DIR / f'{args.out}_by_axis.csv'}")
     return 0
 
 

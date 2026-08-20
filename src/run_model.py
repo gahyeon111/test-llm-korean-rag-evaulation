@@ -28,9 +28,14 @@ COLUMNS = ["qid", "domain", "context_type", "question", "target_answer",
            "temperature", "prompt_version", "contexts_sha256", "run_at"]
 
 
+def model_slug(model: str) -> str:
+    """모델 ID → 파일명 조각. 벤더까지 남긴다
+    (meta-llama/llama-3.3-70b 와 nvidia/llama-3.3-70b 처럼 뒷부분이 겹칠 수 있다)."""
+    return model.replace("/", "-").replace(":", "-")
+
+
 def output_path(model: str, reasoning: str, endpoint: str = "openrouter") -> Path:
-    slug = model.split("/")[-1].replace(":", "-")
-    return RESULT_RAW_DIR / f"{endpoint}__{slug}__{reasoning}.csv"
+    return RESULT_RAW_DIR / f"{endpoint}__{model_slug(model)}__{reasoning}.csv"
 
 
 def contexts_hash(path: Path) -> str:

@@ -88,6 +88,9 @@ def main() -> int:
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--sleep", type=float, default=0.0)
     ap.add_argument("--review-samples", type=int, default=40, help="수동 대조 샘플 수")
+    ap.add_argument("--tag", default="",
+                    help="출력 파일명 접미사. judge 를 바꿔 재채점할 때 구분용 "
+                         "(예: --judge-model X --tag judgeX)")
     ap.add_argument("--force", action="store_true", help="기존 채점 무시하고 재판정")
     ap.add_argument("--abort-after", type=int, default=3,
                     help="연속 N회 실패하면 중단 (judge 모델 ID 오류 등)")
@@ -103,11 +106,14 @@ def main() -> int:
         df = pd.read_csv(raw_path).fillna("")
         if args.limit:
             df = df.head(args.limit)
-        out_path = RESULT_SCORED_DIR / raw_path.name
+        out_path = RESULT_SCORED_DIR / (
+            f"{raw_path.stem}__{args.tag}.csv" if args.tag else raw_path.name)
 
         prev: dict[str, dict] = {}
         if out_path.exists() and not args.force:
-            prev = {str(r["qid"]): r for r in pd.read_csv(out_path).fillna("").to_dict("records")
+            # 모델 답변이 바뀌었으면(재실행 등) 예전 판정을 재사용하면 안 된다.
+            prev = {(str(r["qid"]), str(r.get("model_answer", ""))): r
+                    for r in pd.read_csv(out_path).fillna("").to_dict("records")
                     if str(r.get("verdict")) in {"O", "X"}}
             print(f"이어하기: 기존 판정 {len(prev)}건 재사용 ({out_path.name})")
 
@@ -128,10 +134,11 @@ def main() -> int:
                 scored.append(base | {"verdict": "X", "judge_reason": "모델 응답 실패/빈 응답",
                                       "judge_latency_s": 0})
                 continue
-            if qid in prev:
-                scored.append(base | {k: prev[qid][k] for k in
+            cached = prev.get((qid, str(row.get("model_answer", ""))))
+            if cached:
+                scored.append(base | {k: cached[k] for k in
                                       ("verdict", "judge_reason", "judge_latency_s")
-                                      if k in prev[qid]})
+                                      if k in cached})
                 continue
 
             try:
