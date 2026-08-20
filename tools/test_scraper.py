@@ -4,6 +4,9 @@
   A. 한 게시글에 첨부 여러 개 (bok) → 문서별로 서로 다른 첨부를 배정해야 한다
   B. down.do?...&file_seq=1 형태 링크 (kofia) → 후보로 잡혀야 한다
   C. 목록페이지 (fsc) → 제목이 맞는 상세페이지로 한 번 더 들어가야 한다
+  D. javascript:download('서버파일','원본파일') (법원) → <script> 의 함수 정의에서
+     엔드포인트를 복원해야 한다
+  E. 뷰어 페이지 (kif) → <script> 안의 PDF 경로를 잡아야 한다
 """
 from __future__ import annotations
 
@@ -62,6 +65,33 @@ FSC_DETAIL_HTML = """
 """
 PDF_FSC = b"%PDF-1.6 fsc" + b"3" * 400
 
+# ---- D. 법원 판례 게시판: javascript:download('서버파일','원본파일') ----------
+SCOURT_URL = "https://sgg.scourt.go.kr/dcboard/new/DcNewsViewAction.work?seqnum=25500&gubun=44"
+SCOURT_HTML = """
+<html><head><script>
+function download(fname, oname){
+  location.href = "/dcboard/new/DcNewsDownloadAction.work?gubun=44&filename=" + fname
+                  + "&filename2=" + oname;
+}
+</script></head><body>
+  <a href="javascript:download('1701911870678_101750.pdf','2023000012591.pdf')"
+     title="2023000012591.pdf"></a>
+</body></html>
+"""
+SCOURT_FILE = ("https://sgg.scourt.go.kr/dcboard/new/DcNewsDownloadAction.work"
+               "?gubun=44&filename=1701911870678_101750.pdf&filename2=2023000012591.pdf")
+PDF_SCOURT = b"%PDF-1.4 scourt" + b"4" * 300
+
+# ---- E. 뷰어 페이지: <script> 안에 PDF 경로만 있음 ------------------------
+VIEWER_URL = "https://www.kif.re.kr/kif2/publication/viewer?mid=1302920996309375000"
+VIEWER_HTML = """
+<html><head><title>Preview: KIFVIP2013-10.pdf</title>
+<script>var g_docname = '/KM/1302920996309375000_KIFVIP2013-10.pdf';</script>
+</head><body><div class="pdfimg"></div></body></html>
+"""
+VIEWER_FILE = "https://www.kif.re.kr/KM/1302920996309375000_KIFVIP2013-10.pdf"
+PDF_VIEWER = b"%PDF-1.3 viewer" + b"5" * 300
+
 RESPONSES = {
     BOK_URL: (200, {"content-type": "text/html;charset=utf-8"}, BOK_HTML.encode()),
     "https://www.bok.or.kr/portal/cmmn/file/fileDown.do?atchFileId=FILE_001&fileSn=0":
@@ -81,6 +111,10 @@ RESPONSES = {
     FSC_DETAIL_URL: (200, {"content-type": "text/html;charset=utf-8"}, FSC_DETAIL_HTML.encode()),
     "https://www.fsc.go.kr/comm/getFile?srvcId=BBSTY1&fileTy=ATTACH&fileNo=1":
         (200, {"content-type": "application/pdf"}, PDF_FSC),
+    SCOURT_URL: (200, {"content-type": "text/html;charset=utf-8"}, SCOURT_HTML.encode()),
+    SCOURT_FILE: (200, {"content-type": "application/pdf"}, PDF_SCOURT),
+    VIEWER_URL: (200, {"content-type": "text/html;charset=utf-8"}, VIEWER_HTML.encode()),
+    VIEWER_FILE: (200, {"content-type": "application/pdf"}, PDF_VIEWER),
 }
 
 
@@ -179,12 +213,29 @@ def main() -> int:
     # 8. 제목이 안 맞으면 아무 상세페이지나 따라 들어가지 않는다
     assert follow_candidates(FSC_LIST_HTML, FSC_LIST_URL, ["전혀 상관없는 문서.pdf"]) == []
 
-    # 9. PDF 가 없는 페이지면 빈 목록
+    # 9. D: <script> 의 함수 정의를 읽어 다운로드 URL 을 복원한다 (법원 판례 게시판)
+    urls = [c["url"] for c in candidate_urls(SCOURT_HTML, SCOURT_URL)]
+    assert SCOURT_FILE in urls, urls
+    attachments, meta = collect_attachments(session, SCOURT_URL, cache_dir=cache,
+                                            targets=["2023000012591.pdf"])
+    assert meta["n_attachments"] == 1, f"판례 첨부를 못 찾음: {meta}"
+    assert attachments[0]["path"].read_bytes() == PDF_SCOURT
+    # 링크 텍스트가 비어 있으면 title 속성을 파일명으로 쓴다
+    assert attachments[0]["name"] == "2023000012591.pdf", attachments[0]["name"]
+
+    # 10. E: <script> 안에 PDF 경로만 있는 뷰어 페이지
+    attachments, meta = collect_attachments(session, VIEWER_URL, cache_dir=cache,
+                                            targets=["KIFVIP2013-10.pdf"])
+    assert meta["n_attachments"] == 1, f"뷰어 페이지에서 PDF 를 못 찾음: {meta}"
+    assert attachments[0]["path"].read_bytes() == PDF_VIEWER
+
+    # 11. PDF 가 없는 페이지면 빈 목록
     empty, _ = collect_attachments(session, "https://example.com/none", cache_dir=cache)
     assert empty == []
 
     shutil.rmtree(cache, ignore_errors=True)
-    print("스크래퍼 테스트 통과 (링크수집·파일명·1:1 배정·캐시·kofia·목록페이지 9개 항목)")
+    print("스크래퍼 테스트 통과 — 링크수집·파일명·1:1 배정·캐시·kofia·목록페이지·"
+          "판례 JS·뷰어 페이지 11개 항목")
     return 0
 
 

@@ -48,10 +48,26 @@ def main() -> int:
             print("  (없음 — 첨부가 iframe/JS 로 나중에 그려질 수 있음)")
 
         print("\n[JS 함수 호출]")
+        called = {m.group(1) for m in JS_FUNC_RE.finditer(html)
+                  if FILEISH_RE.search(m.group(1))}
         calls = {m.group(0)[:120] for m in JS_FUNC_RE.finditer(html)
                  if FILEISH_RE.search(m.group(1))}
         for call in list(calls)[:args.max_lines] or ["  (없음)"]:
             print(f"  {call}")
+
+        # 호출된 함수의 정의 — 실제 다운로드 엔드포인트가 여기 들어있다
+        print("\n[해당 함수 정의]")
+        shown_def = False
+        for name in called:
+            for m in re.finditer(
+                    rf"function\s+{re.escape(name)}\s*\([^)]*\)\s*\{{(.{{0,500}}?)\}}",
+                    html, re.S | re.I):
+                body = re.sub(r"\s+", " ", m.group(0))[:400]
+                print(f"  {body}")
+                shown_def = True
+                break
+        if not shown_def:
+            print("  (없음)")
 
         print("\n['pdf' 가 들어간 줄]")
         lines = [ln.strip()[:150] for ln in html.splitlines() if ".pdf" in ln.lower()]

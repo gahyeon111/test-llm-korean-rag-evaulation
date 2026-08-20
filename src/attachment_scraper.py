@@ -31,9 +31,18 @@ ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.I | re.S)
 TAG_RE = re.compile(r"<[^>]+>")
 ATTR_RE = re.compile(r"""(?:href|src|data-url)\s*=\s*["']([^"'<>]+)["']""", re.I)
 JS_CALL_RE = re.compile(
-    r"""(?:fn_egov_downFile|fn_download|fnDownload|downFile|fileDown|goDownload|
-         fn_fileDown|f_fileDown|fileDownload)\s*\(([^)]{0,200})\)""",
+    r"""\b(fn_egov_downFile|fn_fileDown|f_fileDown|fileDownload|fnDownload|
+           fn_download|downFile|fileDown|goDownload|doDownload|downLoad|download)
+        \s*\(([^)]{0,300})\)""",
     re.I | re.X)
+# <script> 안에 PDF 경로가 통째로 박혀 있는 뷰어 페이지 (예: var g_docname = '/KM/….pdf')
+PDF_STRING_RE = re.compile(r"""['"]([^'"\s<>]{1,300}?\.pdf(?:\?[^'"\s<>]{0,200})?)['"]""", re.I)
+# function download(a, b) { location.href = "/…?f=" + a + "&g=" + b; } 형태에서
+# 실제 다운로드 URL 을 복원하기 위한 패턴
+JS_FUNC_DEF_RE_TMPL = r"function\s+{name}\s*\(([^)]*)\)\s*\{{(.{{0,800}}?)\}}"
+JS_CONCAT_RE = re.compile(
+    r"""((?:['"][^'"]*['"]|[A-Za-z_$][\w$]*)(?:\s*\+\s*(?:['"][^'"]*['"]|[A-Za-z_$][\w$]*))+)""")
+ENDPOINT_HINT = re.compile(r"(\.do|\.work|\.jsp|\.php|\.asp|/download|/file)", re.I)
 JS_ARG_RE = re.compile(r"""['"]([^'"]*)['"]""")
 FILE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{6,}$")
 
@@ -123,8 +132,45 @@ def _anchor_text(inner_html: str) -> str:
     return re.sub(r"\s+", " ", TAG_RE.sub(" ", inner_html)).strip()
 
 
-def _js_download_urls(base_url: str, args_text: str, known_paths: list[str]) -> list[str]:
-    """fn_egov_downFile('FILE_000...','0') 같은 호출을 실제 다운로드 URL 로 바꾼다."""
+def resolve_js_call(html: str, base_url: str, func_name: str,
+                    args_text: str) -> list[str]:
+    """페이지 안의 함수 정의를 읽어 다운로드 URL 을 복원한다.
+
+    법원 판례 게시판처럼 `javascript:download('서버파일명','원본파일명')` 만 있고
+    엔드포인트가 <script> 안에 있는 사이트를 위해서다. 함수 본문의 문자열 결합
+    (`"/x.work?f=" + a + "&g=" + b`)을 실제 인자로 치환해 URL 을 만든다.
+    """
+    args = JS_ARG_RE.findall(args_text)
+    match = re.search(JS_FUNC_DEF_RE_TMPL.format(name=re.escape(func_name)), html,
+                      re.S | re.I)
+    if not match:
+        return []
+    params = [p.strip() for p in match.group(1).split(",") if p.strip()]
+    body = match.group(2)
+    values = {p: args[i] for i, p in enumerate(params) if i < len(args)}
+
+    urls = []
+    for chain in JS_CONCAT_RE.findall(body):
+        parts, ok = [], True
+        for token in re.split(r"\s*\+\s*", chain):
+            token = token.strip()
+            if token[:1] in "'\"" and token[-1:] == token[:1]:
+                parts.append(token[1:-1])
+            elif token in values:
+                parts.append(values[token])
+            else:
+                ok = False
+                break
+        if not ok:
+            continue
+        built = "".join(parts)
+        if "/" in built and ENDPOINT_HINT.search(built):
+            urls.append(urllib.parse.urljoin(base_url, built.replace("&amp;", "&")))
+    return urls
+
+
+def _egov_download_urls(base_url: str, args_text: str, known_paths: list[str]) -> list[str]:
+    """fn_egov_downFile('FILE_000...','0') 같은 표준프레임워크 호출을 URL 로."""
     args = [a.strip() for a in JS_ARG_RE.findall(args_text) if a.strip()]
     if not args or not FILE_ID_RE.match(args[0]):
         return []
@@ -140,49 +186,61 @@ def _js_download_urls(base_url: str, args_text: str, known_paths: list[str]) -> 
 def candidate_urls(html: str, base_url: str, limit: int = 15) -> list[dict]:
     """첨부 다운로드로 보이는 링크를 우선순위대로 수집.
 
-    반환: [{url, name_hint}] — name_hint 는 링크 텍스트(파일명이 적혀 있는 경우가 많다).
+    반환: [{url, name_hint}] — name_hint 는 링크 텍스트/타이틀(파일명이 적힌 경우가 많다).
     """
     collected: list[tuple[int, str, str]] = []   # (우선순위, url, name_hint)
     known_paths: list[str] = []
-    js_args: list[tuple[str, str]] = []
+    js_calls: list[tuple[str, str, str]] = []    # (함수명, 인자, 힌트)
     seen: set[str] = set()
 
-    def add(raw: str, name_hint: str) -> None:
+    def add(url: str, name_hint: str, priority: int) -> None:
+        if not url or url in seen:
+            return
+        seen.add(url)
+        collected.append((priority, url, name_hint))
+        path = urllib.parse.urlsplit(url).path
+        if DOWNLOAD_PATH_HINT.search(path):
+            known_paths.append(path)
+
+    def add_raw(raw: str, name_hint: str) -> None:
         raw = raw.strip().replace("&amp;", "&")
         if not raw or SKIP_SCHEME.match(raw):
             return
         if raw.lower().startswith("javascript:"):
-            js_args.extend((m.group(1), name_hint)
-                           for m in JS_CALL_RE.finditer(raw))
+            js_calls.extend((m.group(1), m.group(2), name_hint)
+                            for m in JS_CALL_RE.finditer(raw))
             return
         priority = 0 if STRONG_HINT.search(raw) else (1 if WEAK_HINT.search(raw) else None)
         if priority is None or NAV_HINT.search(raw):
             return
-        absolute = urllib.parse.urljoin(base_url, raw)
-        if absolute in seen:
-            return
-        seen.add(absolute)
-        collected.append((priority, absolute, name_hint))
-        path = urllib.parse.urlsplit(absolute).path
-        if DOWNLOAD_PATH_HINT.search(path):
-            known_paths.append(path)
+        add(urllib.parse.urljoin(base_url, raw), name_hint, priority)
 
     for attrs, inner in ANCHOR_RE.findall(html):
+        # 링크 텍스트가 비면 title 속성을 파일명 힌트로 쓴다
         hint = _anchor_text(inner)
+        if not hint:
+            title = re.search(r"""title\s*=\s*["']([^"']+)["']""", attrs, re.I)
+            hint = title.group(1).strip() if title else ""
         for value in ATTR_RE.findall(attrs):
-            add(value, hint)
-        for match in JS_CALL_RE.finditer(attrs):
-            js_args.append((match.group(1), hint))
+            add_raw(value, hint)
+        js_calls.extend((m.group(1), m.group(2), hint)
+                        for m in JS_CALL_RE.finditer(attrs))
 
     for value in ATTR_RE.findall(html):   # a 태그 밖의 링크
-        add(value, "")
-    js_args.extend((m.group(1), "") for m in JS_CALL_RE.finditer(html))
+        add_raw(value, "")
+    js_calls.extend((m.group(1), m.group(2), "") for m in JS_CALL_RE.finditer(html))
 
-    for args_text, hint in js_args:
-        for url in _js_download_urls(base_url, args_text, known_paths):
-            if url not in seen:
-                seen.add(url)
-                collected.append((0, url, hint))
+    for func_name, args_text, hint in js_calls:
+        resolved = resolve_js_call(html, base_url, func_name, args_text)
+        for url in resolved or _egov_download_urls(base_url, args_text, known_paths):
+            add(url, hint, 0)
+
+    # <script> 안에 박힌 PDF 경로 (뷰어 페이지)
+    for raw in PDF_STRING_RE.findall(html):
+        if SKIP_SCHEME.match(raw):
+            continue
+        url = urllib.parse.urljoin(base_url, raw.replace("&amp;", "&"))
+        add(url, Path(urllib.parse.urlsplit(url).path).name, 0)
 
     collected.sort(key=lambda item: item[0])
     return [{"url": url, "name_hint": hint} for _, url, hint in collected[:limit]]
