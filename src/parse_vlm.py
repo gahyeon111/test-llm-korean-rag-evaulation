@@ -88,6 +88,17 @@ def main() -> int:
              .dropna().drop_duplicates()
              .sort_values(["target_file_name", "target_page_no"]))
     print(f"유니크 (문서, 페이지) 페어: {len(pairs)}건")
+
+    # 다운로드 실패 문서는 제외 목록에 없어도 파싱할 수 없다.
+    # 미리 걸러야 실제 작업량(=비용)이 숫자에 드러난다.
+    has_pdf = pairs["target_file_name"].map(lambda f: pdf_path(f).exists())
+    no_pdf_docs = sorted(set(pairs.loc[~has_pdf, "target_file_name"]))
+    if no_pdf_docs:
+        print(f"  PDF 없음으로 제외: {int((~has_pdf).sum())}페어 "
+              f"(문서 {len(no_pdf_docs)}개 — 다운로드 실패분)")
+        pairs = pairs[has_pdf]
+    print(f"  → 실제 파싱 대상: {len(pairs)}페어 "
+          f"(문서 {pairs['target_file_name'].nunique()}개)")
     if args.limit:
         pairs = pairs.head(args.limit)
 
