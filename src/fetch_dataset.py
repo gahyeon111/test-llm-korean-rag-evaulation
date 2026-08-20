@@ -21,6 +21,11 @@ from common import (DATASET_CSV, DOCUMENTS_ALIASES, DATASET_ALIASES, DOCUMENTS_C
 REPO_ID = "allganize/RAG-Evaluation-Dataset-KO"
 DATASET_REQUIRED = ["question", "target_answer", "target_file_name",
                     "target_page_no", "context_type", "domain"]
+# 원본 라벨 흔들림 보정: medical 도메인만 paragraph 를 text 로 표기한다.
+# 스펙 §4.6 집계 축은 paragraph·table·image 세 개이므로 여기서 통일하고,
+# 원본 값은 context_type_raw 로 남긴다.
+CONTEXT_TYPE_MAP = {"text": "paragraph", "문단": "paragraph",
+                    "표": "table", "이미지": "image"}
 
 
 def load_via_datasets(repo_id: str) -> pd.DataFrame:
@@ -58,6 +63,8 @@ def main() -> int:
     ap.add_argument("--documents-file", default="documents.csv",
                     help="문서 메타 CSV 파일명 (없으면 dataset 에서 유도)")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--no-normalize-context-type", action="store_true",
+                    help="context_type 라벨 통일(text→paragraph) 비활성화")
     args = ap.parse_args()
 
     if DATASET_CSV.exists() and not args.overwrite:
@@ -75,14 +82,32 @@ def main() -> int:
 
     dataset = normalize_columns(dataset, DATASET_ALIASES, required=DATASET_REQUIRED)
     dataset = dataset[DATASET_REQUIRED].copy()
-    dataset["target_page_no"] = (
-        pd.to_numeric(dataset["target_page_no"], errors="coerce").astype("Int64")
-    )
-    bad_pages = int(dataset["target_page_no"].isna().sum())
-    if bad_pages:
-        print(f"경고: target_page_no 파싱 실패 {bad_pages}건 (해당 문항은 파싱 대상에서 제외됨)")
     # qid 는 여기서 한 번만 부여하고 이후 전 단계에서 그대로 사용한다.
     dataset.insert(0, "qid", [f"q{i:04d}" for i in range(1, len(dataset) + 1)])
+
+    dataset["context_type_raw"] = dataset["context_type"]
+    if not args.no_normalize_context_type:
+        dataset["context_type"] = (dataset["context_type"].astype(str).str.strip()
+                                   .replace(CONTEXT_TYPE_MAP))
+        changed = dataset[dataset["context_type"] != dataset["context_type_raw"]]
+        if len(changed):
+            mapping = (changed.groupby(["context_type_raw", "context_type"]).size()
+                       .reset_index(name="n"))
+            print("context_type 라벨 통일:")
+            for row in mapping.itertuples(index=False):
+                print(f"  {row.context_type_raw} → {row.context_type} ({row.n}건)")
+
+    raw_pages = dataset["target_page_no"]
+    dataset["target_page_no"] = pd.to_numeric(raw_pages, errors="coerce").astype("Int64")
+    bad = dataset["target_page_no"].isna()
+    if bad.any():
+        print(f"경고: target_page_no 파싱 실패 {int(bad.sum())}건 "
+              "— context 를 만들 수 없어 평가에서 제외됩니다:")
+        for qid, file_name, value, question in zip(
+                dataset.loc[bad, "qid"], dataset.loc[bad, "target_file_name"],
+                raw_pages[bad], dataset.loc[bad, "question"]):
+            print(f"  {qid} | {file_name} | page={value!r} | {str(question)[:40]}…")
+
     dataset.to_csv(DATASET_CSV, index=False)
     print(f"저장: {DATASET_CSV} ({len(dataset)}문항)")
 

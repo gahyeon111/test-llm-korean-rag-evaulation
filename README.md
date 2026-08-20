@@ -39,6 +39,8 @@ cp .env.example .env    # OPENROUTER_API_KEY 입력
 ```bash
 # 0. 데이터 수급 — HF datasets 기본, 실패 시 repo CSV 직접 다운로드로 폴백
 python src/fetch_dataset.py
+#    → 300문항 / 64문서. context_type 라벨을 paragraph·table·image 로 통일하고
+#      원본 값은 context_type_raw 로 남긴다 (--no-normalize-context-type 로 해제)
 
 # 1. PDF 다운로드 (URL 만료 문서 = 평가 제외 문항 확정)
 python src/download_pdfs.py
@@ -94,6 +96,15 @@ reports/judge_review_*.csv             judge 수동 대조 샘플
 reports/parser_suspect_*.csv           image·table 오답의 모델 실패 vs 파서 실패 후보
 reports/summary.md, summary_by_axis.csv  집계 리포트
 ```
+
+## 원본 데이터 특이사항
+
+- `context_type` 라벨이 도메인마다 흔들린다 — medical 은 paragraph 대신 `text`(45건)를 쓴다.
+  `fetch_dataset.py` 가 이를 paragraph 로 통일하고 원본은 `context_type_raw` 에 보존한다.
+  통일하지 않으면 집계 축이 4개로 쪼개져 도메인 간 비교가 깨진다.
+- `target_page_no` 가 비어 있는 문항이 1건 있다. context 를 만들 수 없어 자동 제외되며,
+  `fetch_dataset.py` 실행 로그와 `reports/context_missing.csv` 에 qid 가 남는다.
+  → 실제 평가 모수는 300 − (페이지 결측) − (PDF 다운로드 실패) 문항이다.
 
 ## 리포트 집계 축
 
