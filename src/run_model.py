@@ -66,6 +66,8 @@ def main() -> int:
                          '(예: \'{"chat_template_kwargs":{"enable_thinking":false}}\')')
     ap.add_argument("--out", default="")
     ap.add_argument("--force", action="store_true", help="기존 결과 무시하고 전부 재호출")
+    ap.add_argument("--save-every", type=int, default=10,
+                    help="N건마다 중간 저장 (중단돼도 이어서 실행 가능)")
     ap.add_argument("--abort-after", type=int, default=3,
                     help="연속 N회 실패하면 중단 (모델 ID·provider 설정 오류 등)")
     args = ap.parse_args()
@@ -101,65 +103,78 @@ def main() -> int:
     n_failed = 0
     consecutive_failures = 0
 
-    for i, rec in enumerate(records, start=1):
-        qid = rec["qid"]
-        if qid in done:
-            rows.append(done[qid])
-            continue
+    def save(rows_so_far: list[dict]) -> pd.DataFrame:
+        """중간 저장. Ctrl-C 로 끊겨도 여기까지의 호출 결과는 남는다."""
+        frame = pd.DataFrame(rows_so_far)
+        for column in COLUMNS:
+            if column not in frame.columns:
+                frame[column] = ""
+        frame[COLUMNS].to_csv(out_path, index=False)
+        return frame
 
-        prompt = template.format(context=rec["context"], question=rec["question"])
-        base = {k: rec.get(k, "") for k in
-                ["qid", "domain", "context_type", "question", "target_answer",
-                 "target_file", "target_page"]}
-        base |= {
-            "model": args.model, "reasoning_effort": args.reasoning,
-            "temperature": args.temperature, "prompt_version": PROMPT_VERSION,
-            "contexts_sha256": ctx_sha, "run_at": run_at,
-        }
+    try:
+        for i, rec in enumerate(records, start=1):
+            qid = rec["qid"]
+            if qid in done:
+                rows.append(done[qid])
+                continue
 
-        try:
-            result = chat_completion(
-                args.model,
-                [{"role": "user", "content": prompt}],
-                temperature=args.temperature,
-                reasoning_effort=reasoning_effort,
-                provider=provider or None,
-                extra_body=extra_body,
-                retries=args.retries,
-                api_key=api_key,
-            )
-        except OpenRouterError as exc:
-            n_failed += 1
-            rows.append(base | {"model_answer": "", "status": "failed",
-                                "error": str(exc)[:500], "provider": "",
-                                "latency_s": 0, "attempts": args.retries,
-                                "prompt_tokens": 0, "completion_tokens": 0,
-                                "reasoning_tokens": 0, "total_tokens": 0})
-            print(f"[{i}/{len(records)}] {qid} … 실패: {str(exc)[:300]}")
-            consecutive_failures += 1
-            if consecutive_failures >= args.abort_after:
-                raise SystemExit(
-                    f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
-                    f"마지막 오류: {str(exc)[:400]}")
-            continue
+            prompt = template.format(context=rec["context"], question=rec["question"])
+            base = {k: rec.get(k, "") for k in
+                    ["qid", "domain", "context_type", "question", "target_answer",
+                     "target_file", "target_page"]}
+            base |= {
+                "model": args.model, "reasoning_effort": args.reasoning,
+                "temperature": args.temperature, "prompt_version": PROMPT_VERSION,
+                "contexts_sha256": ctx_sha, "run_at": run_at,
+            }
 
-        rows.append(base | {
-            "model_answer": result["text"], "status": "ok", "error": "",
-            "provider": result["provider"], "latency_s": result["latency_s"],
-            "attempts": result["attempts"], **result["usage"],
-        })
-        consecutive_failures = 0
-        print(f"[{i}/{len(records)}] {qid} … ok "
-              f"({result['provider']}, {result['latency_s']}s, "
-              f"reasoning {result['usage']['reasoning_tokens']}tok)")
-        if args.sleep:
-            time.sleep(args.sleep)
+            try:
+                result = chat_completion(
+                    args.model,
+                    [{"role": "user", "content": prompt}],
+                    temperature=args.temperature,
+                    reasoning_effort=reasoning_effort,
+                    provider=provider or None,
+                    extra_body=extra_body,
+                    retries=args.retries,
+                    api_key=api_key,
+                )
+            except OpenRouterError as exc:
+                n_failed += 1
+                rows.append(base | {"model_answer": "", "status": "failed",
+                                    "error": str(exc)[:500], "provider": "",
+                                    "latency_s": 0, "attempts": args.retries,
+                                    "prompt_tokens": 0, "completion_tokens": 0,
+                                    "reasoning_tokens": 0, "total_tokens": 0})
+                print(f"[{i}/{len(records)}] {qid} … 실패: {str(exc)[:300]}")
+                consecutive_failures += 1
+                if consecutive_failures >= args.abort_after:
+                    raise SystemExit(
+                        f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
+                        f"마지막 오류: {str(exc)[:400]}")
+                continue
 
-    df = pd.DataFrame(rows)
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    df[COLUMNS].to_csv(out_path, index=False)
+            rows.append(base | {
+                "model_answer": result["text"], "status": "ok", "error": "",
+                "provider": result["provider"], "latency_s": result["latency_s"],
+                "attempts": result["attempts"], **result["usage"],
+            })
+            consecutive_failures = 0
+            print(f"[{i}/{len(records)}] {qid} … ok "
+                  f"({result['provider']}, {result['latency_s']}s, "
+                  f"reasoning {result['usage']['reasoning_tokens']}tok)")
+            if args.save_every and i % args.save_every == 0:
+                save(rows)
+            if args.sleep:
+                time.sleep(args.sleep)
+    except KeyboardInterrupt:
+        df = save(rows)
+        print(f"\n중단됨 — 여기까지 {len(df)}건을 {out_path} 에 저장했습니다. "
+              "같은 명령을 다시 실행하면 이어서 진행합니다.")
+        return 130
+
+    df = save(rows)
 
     print(f"\n저장: {out_path} ({len(df)}건, 실패 {n_failed}건)")
     routed = df.loc[df["status"] == "ok", "provider"].value_counts()

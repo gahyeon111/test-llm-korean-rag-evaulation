@@ -92,6 +92,8 @@ def main() -> int:
                     help="출력 파일명 접미사. judge 를 바꿔 재채점할 때 구분용 "
                          "(예: --judge-model X --tag judgeX)")
     ap.add_argument("--force", action="store_true", help="기존 채점 무시하고 재판정")
+    ap.add_argument("--save-every", type=int, default=10,
+                    help="N건마다 중간 저장 (중단돼도 이어서 채점 가능)")
     ap.add_argument("--abort-after", type=int, default=3,
                     help="연속 N회 실패하면 중단 (judge 모델 ID 오류 등)")
     args = ap.parse_args()
@@ -118,48 +120,61 @@ def main() -> int:
             print(f"이어하기: 기존 판정 {len(prev)}건 재사용 ({out_path.name})")
 
         print(f"\n=== {raw_path.name} ({len(df)}건) ===")
-        scored = []
+        scored: list[dict] = []
         consecutive_failures = 0
-        for i, row in enumerate(df.to_dict("records"), start=1):
-            qid = str(row["qid"])
-            nm, n_total, n_hit = numeric_cross_check(row.get("target_answer", ""),
-                                                     row.get("model_answer", ""))
-            base = row | {
-                "numeric_match": nm, "numeric_targets": n_total, "numeric_hits": n_hit,
-                "judge_model": args.judge_model, "judge_prompt_version": args.prompt_version,
-                "judged_at": datetime.now(timezone.utc).isoformat(),
-            }
 
-            if str(row.get("status")) != "ok" or not str(row.get("model_answer")).strip():
-                scored.append(base | {"verdict": "X", "judge_reason": "모델 응답 실패/빈 응답",
-                                      "judge_latency_s": 0})
-                continue
-            cached = prev.get((qid, str(row.get("model_answer", ""))))
-            if cached:
-                scored.append(base | {k: cached[k] for k in
-                                      ("verdict", "judge_reason", "judge_latency_s")
-                                      if k in cached})
-                continue
+        def save(rows_so_far: list[dict], path=out_path) -> pd.DataFrame:
+            frame = pd.DataFrame(rows_so_far)
+            frame.to_csv(path, index=False)
+            return frame
+        try:
+            for i, row in enumerate(df.to_dict("records"), start=1):
+                qid = str(row["qid"])
+                nm, n_total, n_hit = numeric_cross_check(row.get("target_answer", ""),
+                                                         row.get("model_answer", ""))
+                base = row | {
+                    "numeric_match": nm, "numeric_targets": n_total, "numeric_hits": n_hit,
+                    "judge_model": args.judge_model, "judge_prompt_version": args.prompt_version,
+                    "judged_at": datetime.now(timezone.utc).isoformat(),
+                }
 
-            try:
-                verdict = judge_one(template, row, args.judge_model, api_key, args.retries)
-            except OpenRouterError as exc:
-                verdict = {"verdict": "JUDGE_FAILED", "judge_reason": str(exc)[:300],
-                           "judge_latency_s": 0}
-                consecutive_failures += 1
-                if consecutive_failures >= args.abort_after:
-                    raise SystemExit(
-                        f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
-                        f"마지막 오류: {str(exc)[:400]}")
-            else:
-                consecutive_failures = 0
-            scored.append(base | verdict)
-            print(f"[{i}/{len(df)}] {qid} … {verdict['verdict']} (numeric={nm})")
-            if args.sleep:
-                time.sleep(args.sleep)
+                if str(row.get("status")) != "ok" or not str(row.get("model_answer")).strip():
+                    scored.append(base | {"verdict": "X", "judge_reason": "모델 응답 실패/빈 응답",
+                                          "judge_latency_s": 0})
+                    continue
+                cached = prev.get((qid, str(row.get("model_answer", ""))))
+                if cached:
+                    scored.append(base | {k: cached[k] for k in
+                                          ("verdict", "judge_reason", "judge_latency_s")
+                                          if k in cached})
+                    continue
 
-        out = pd.DataFrame(scored)
-        out.to_csv(out_path, index=False)
+                try:
+                    verdict = judge_one(template, row, args.judge_model, api_key, args.retries)
+                except OpenRouterError as exc:
+                    verdict = {"verdict": "JUDGE_FAILED", "judge_reason": str(exc)[:300],
+                               "judge_latency_s": 0}
+                    consecutive_failures += 1
+                    if consecutive_failures >= args.abort_after:
+                        raise SystemExit(
+                            f"\n연속 {consecutive_failures}회 실패 — 설정 문제로 보고 중단합니다.\n"
+                            f"마지막 오류: {str(exc)[:400]}")
+                else:
+                    consecutive_failures = 0
+                scored.append(base | verdict)
+                print(f"[{i}/{len(df)}] {qid} … {verdict['verdict']} (numeric={nm})")
+                if args.save_every and i % args.save_every == 0:
+                    save(scored)
+                if args.sleep:
+                    time.sleep(args.sleep)
+
+        except KeyboardInterrupt:
+            out = save(scored)
+            print(f"\n중단됨 — 여기까지 {len(out)}건을 {out_path} 에 저장했습니다. "
+                  "같은 명령을 다시 실행하면 이어서 채점합니다.")
+            return 130
+
+        out = save(scored)
 
         n_o = int((out["verdict"] == "O").sum())
         n_valid = int(out["verdict"].isin(["O", "X"]).sum())
